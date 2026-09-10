@@ -15,10 +15,11 @@ const metadataRoutes = require('./routes/metadata');
 const app = express();
 
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const ALLOWED_ORIGINS = CLIENT_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
 
 app.set('trust proxy', 1);
 app.use(helmet());
-app.use(cors({ origin: CLIENT_ORIGIN }));
+app.use(cors({ origin: ALLOWED_ORIGINS, exposedHeaders: ['Content-Disposition'] }));
 app.use(express.json({ limit: '100kb' })); // Throws a 413 via error handler when exceeded
 
 // Brute-force guard for auth endpoints

@@ -77,9 +77,10 @@ function parseImportRows(buffer, originalname) {
     const title = String(r.Title || r.title || '').trim();
     const url = String(r.URL || r.url || r.Hyperlink || r.hyperlink || '').trim();
     const tagsRaw = String(r.Tags || r.tags || '');
+    const description = String(r.Description || r.description || '').trim();
     const collection = String(r.Collection || r.collection || '').trim();
     const hyperlink = String(r.Hyperlink || r.hyperlink || '').trim();
-    return { title, url: url || hyperlink, tagsRaw, collection };
+    return { title, url: url || hyperlink, tagsRaw, description, collection };
   });
 }
 
@@ -137,6 +138,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
           user: req.userId,
           title: row.title || row.url,
           url: normalizeUrl(row.url),
+          description: row.description || '',
           collectionId,
           tags: normalizeTags(tags),
           favorite: false,
@@ -173,6 +175,7 @@ router.get('/export', async (req, res) => {
         Title: l.title,
         URL: l.url,
         Tags: (l.tags || []).join(', '),
+        Description: l.description || '',
         Collection: l.collectionId ? collectionNameMap[String(l.collectionId)] || '' : '',
         Hyperlink: l.url,
       }));
@@ -199,6 +202,7 @@ router.get('/export', async (req, res) => {
       { header: 'Title',      key: 'title',      width: 35 },
       { header: 'URL',        key: 'url',        width: 65 },
       { header: 'Tags',       key: 'tags',       width: 28 },
+      { header: 'Description', key: 'description', width: 40 },
       { header: 'Collection', key: 'collection', width: 22 },
       { header: 'Hyperlink',  key: 'hyperlink',  width: 35 },
     ];
@@ -218,6 +222,7 @@ router.get('/export', async (req, res) => {
         title:      l.title || '',
         url:        l.url   || '',
         tags:       (l.tags || []).join(', '),
+        description: l.description || '',
         collection: collectionName,
         hyperlink:  l.title || l.url || '',   // display text — set as hyperlink below
       });
