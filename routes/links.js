@@ -1,4 +1,5 @@
 const express = require('express');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const Link = require('../models/Link');
@@ -59,6 +60,28 @@ async function ownsCollection(collectionId, userId) {
   return Boolean(await Collection.exists({ _id: collectionId, user: userId }));
 }
 
+async function findDuplicateUrl(userId, url, excludeId = null) {
+  const q = { user: userId, deletedAt: null, url };
+  if (excludeId) q._id = { $ne: excludeId };
+  return Link.findOne(q).select('_id title url createdAt');
+}
+
+// Per-user throttle on the visit endpoint so a single account cannot hammer the
+// server or inflate analytics. Keyed by userId (many users sit behind one IP).
+const visitLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.userId ? String(req.userId) : ipKeyGenerator(req.ip)),
+  handler: (req, res) => res.status(429).json({ error: 'Too many requests. Please try again later.' }),
+});
+
+// Collapse repeated opens of the same link within a short window into one visit.
+// In-memory per process — exact on a single instance, best-effort if scaled out.
+const VISIT_DEBOUNCE_MS = 60 * 1000;
+const visitDebounce = new Map();
+
 // --- IMPORT / EXPORT ---
 
 function parseImportRows(buffer, originalname) {
@@ -94,6 +117,8 @@ router.post('/import', upload.single('file'), async (req, res) => {
     const rows = parseImportRows(req.file.buffer, req.file.originalname);
     const errors = [];
     let imported = 0;
+    let skipped = 0;
+    const seenUrls = new Set();
 
     // Pre-load or create collections by name
     const collectionMap = {};
@@ -133,11 +158,23 @@ router.post('/import', upload.single('file'), async (req, res) => {
         ? row.tagsRaw.split(',').map((t) => t.trim()).filter(Boolean)
         : [];
 
+      const url = normalizeUrl(row.url);
+      if (seenUrls.has(url)) {
+        skipped++;
+        continue;
+      }
+      const duplicate = await findDuplicateUrl(req.userId, url);
+      if (duplicate) {
+        skipped++;
+        continue;
+      }
+      seenUrls.add(url);
+
       try {
         await Link.create({
           user: req.userId,
           title: row.title || row.url,
-          url: normalizeUrl(row.url),
+          url,
           description: row.description || '',
           collectionId,
           tags: normalizeTags(tags),
@@ -150,7 +187,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
       }
     }
 
-    res.json({ imported, errors });
+    res.json({ imported, skipped, errors });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to import links.' });
@@ -413,10 +450,19 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Invalid color format.' });
     }
 
+    url = normalizeUrl(url);
+    const existing = await findDuplicateUrl(req.userId, url);
+    if (existing) {
+      return res.status(409).json({
+        error: 'A link with this URL already exists.',
+        existing: { _id: existing._id, title: existing.title, url: existing.url, createdAt: existing.createdAt },
+      });
+    }
+
     const link = await Link.create({
       user: req.userId,
       title: String(title).trim(),
-      url: normalizeUrl(url),
+      url,
       description: typeof description === 'string' ? description.trim() : '',
       collectionId: collectionId || null,
       tags: normalizeTags(tags),
@@ -502,7 +548,19 @@ router.patch('/:id', async (req, res) => {
     }
 
     if (title !== undefined) link.title = String(title).trim();
-    if (url !== undefined) link.url = normalizeUrl(url);
+    if (url !== undefined) {
+      const newUrl = normalizeUrl(url);
+      if (newUrl !== link.url) {
+        const existing = await findDuplicateUrl(req.userId, newUrl, link._id);
+        if (existing) {
+          return res.status(409).json({
+            error: 'Another saved link already uses this URL.',
+            existing: { _id: existing._id, title: existing.title, url: existing.url, createdAt: existing.createdAt },
+          });
+        }
+      }
+      link.url = newUrl;
+    }
     if (description !== undefined) link.description = String(description).trim();
     if (color !== undefined) link.color = color;
     if (favorite !== undefined) link.favorite = Boolean(favorite);
@@ -572,15 +630,24 @@ router.delete('/:id/permanent', async (req, res) => {
 });
 
 // POST /api/links/:id/visit
-router.post('/:id/visit', async (req, res) => {
+router.post('/:id/visit', visitLimiter, async (req, res) => {
   if (!isObjectId(req.params.id)) return res.status(400).json({ error: 'Invalid link id.' });
   try {
-    const link = await Link.findOne({ _id: req.params.id, user: req.userId, deletedAt: null });
-    if (!link) return res.status(404).json({ error: 'Link not found.' });
+    const key = `${req.userId}:${req.params.id}`;
+    const now = Date.now();
+    const last = visitDebounce.get(key);
+    if (last && now - last < VISIT_DEBOUNCE_MS) {
+      return res.status(204).end();
+    }
+    if (visitDebounce.size > 50000) visitDebounce.clear();
+    visitDebounce.set(key, now);
 
-    link.visits += 1;
-    link.lastVisitedAt = new Date();
-    await link.save();
+    const link = await Link.findOneAndUpdate(
+      { _id: req.params.id, user: req.userId, deletedAt: null },
+      { $inc: { visits: 1 }, $set: { lastVisitedAt: new Date() } },
+      { new: true }
+    );
+    if (!link) return res.status(404).json({ error: 'Link not found.' });
 
     await Visit.create({ user: req.userId, link: link._id });
 

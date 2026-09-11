@@ -1,0 +1,49 @@
+# Render Blueprint - Link Universe Backend API
+#
+# Deploy via Render: Dashboard -> New -> Blueprint -> select this repository.
+# Steps:
+#   1. Fill in MONGODB_URI and JWT_SECRET in the Render dashboard.
+#   2. Replace CLIENT_ORIGIN below with your real Vercel/hosted frontend
+#      origins (comma-separated, no spaces).
+#   3. For staging, uncomment the second service and give it its own
+#      CLIENT_ORIGIN + secrets.
+
+services:
+  - type: web
+    name: link-universe-backend
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_ORIGIN
+        value: https://YOUR-PROJECT.vercel.app,https://YOUR-PROJECT-git-main-YOUR-USER.vercel.app
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+
+# Optional staging API (uncomment to deploy a second environment):
+#   - type: web
+#     name: link-universe-backend-staging
+#     runtime: node
+#     region: oregon
+#     plan: free
+#     rootDir: backend
+#     buildCommand: npm install
+#     startCommand: npm start
+#     healthCheckPath: /api/health
+#     envVars:
+#       - key: NODE_ENV
+#         value: production
+#       - key: CLIENT_ORIGIN
+#         value: https://YOUR-PROJECT-git-develop-YOUR-USER.vercel.app
+#       - key: MONGODB_URI
+#         sync: false
+#       - key: JWT_SECRET
+#         sync: false
