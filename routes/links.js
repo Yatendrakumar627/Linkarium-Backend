@@ -45,6 +45,8 @@ function sortOption(value) {
       return { visits: -1 };
     case 'favorite':
       return { favorite: -1, createdAt: -1 };
+    case 'name':
+      return { title: 1 };
     default:
       return { createdAt: -1 };
   }
