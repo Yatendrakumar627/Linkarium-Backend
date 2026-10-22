@@ -21,7 +21,12 @@ if (!process.env.JWT_SECRET) {
 }
 
 mongoose
-  .connect(process.env.MONGODB_URI)
+  .connect(process.env.MONGODB_URI, {
+    maxPoolSize: 50,
+    minPoolSize: 5,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
   .then(() => {
     console.log('✅ Connected to MongoDB Atlas');
 

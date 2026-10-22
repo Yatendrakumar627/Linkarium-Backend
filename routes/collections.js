@@ -14,17 +14,18 @@ router.use(auth);
 // GET /api/collections — list with link counts
 router.get('/', async (req, res) => {
   try {
-    const collections = await Collection.find({ user: req.userId }).sort({ createdAt: -1 });
-
-    const counts = await Link.aggregate([
-      {
-        $match: {
-          user: new mongoose.Types.ObjectId(req.userId),
-          collectionId: { $ne: null },
-          deletedAt: null,
+    const [collections, counts] = await Promise.all([
+      Collection.find({ user: req.userId }).sort({ createdAt: -1 }).lean(),
+      Link.aggregate([
+        {
+          $match: {
+            user: new mongoose.Types.ObjectId(req.userId),
+            collectionId: { $ne: null },
+            deletedAt: null,
+          },
         },
-      },
-      { $group: { _id: '$collectionId', count: { $sum: 1 } } },
+        { $group: { _id: '$collectionId', count: { $sum: 1 } } },
+      ]),
     ]);
 
     const countMap = {};

@@ -45,7 +45,8 @@ router.get('/recently-visited', async (req, res) => {
     const visits = await Visit.find({ user: req.userId })
       .sort({ visitedAt: -1 })
       .limit(8)
-      .populate('link', 'title url color collectionId tags favorite');
+      .populate('link', 'title url color collectionId tags favorite')
+      .lean();
 
     res.json(
       visits
@@ -66,7 +67,10 @@ router.get('/recently-visited', async (req, res) => {
 // GET /api/analytics/top-links
 router.get('/top-links', async (req, res) => {
   try {
-    const links = await Link.find({ user: req.userId, deletedAt: null }).sort({ visits: -1, lastVisitedAt: -1 }).limit(5);
+    const links = await Link.find({ user: req.userId, deletedAt: null })
+      .sort({ visits: -1, lastVisitedAt: -1 })
+      .limit(5)
+      .lean();
     res.json(links);
   } catch (err) {
     console.error(err);

@@ -31,39 +31,56 @@ router.get('/suggest', async (req, res) => {
 
     const suggestions = new Set();
 
+    const promises = [];
+
     if (term.length >= 2) {
       const rx = new RegExp(`^${escapeRegex(term)}`);
-      const tokens = await Link.distinct('tokens', {
-        user: req.userId,
-        deletedAt: null,
-        tokens: rx,
-      });
-      for (const t of tokens) {
-        if (t !== term && t.startsWith(term)) suggestions.add(t);
-      }
+      promises.push(
+        Link.distinct('tokens', {
+          user: req.userId,
+          deletedAt: null,
+          tokens: rx,
+        }).catch(() => [])
+      );
+    } else {
+      promises.push(Promise.resolve([]));
     }
 
     // Tags are a natural completion for "tag:" and free text alike.
     const tagRx = new RegExp(`^${escapeRegex(term)}`, 'i');
-    const tags = await Link.aggregate([
-      { $match: { user: req.userId, deletedAt: null } },
-      { $unwind: '$tags' },
-      { $match: { tags: tagRx } },
-      { $group: { _id: '$tags', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-      { $limit: MAX_SUGGESTIONS },
-    ]);
+    promises.push(
+      Link.aggregate([
+        { $match: { user: req.userId, deletedAt: null } },
+        { $unwind: '$tags' },
+        { $match: { tags: tagRx } },
+        { $group: { _id: '$tags', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: MAX_SUGGESTIONS },
+      ]).catch(() => [])
+    );
+
+    // Collection names.
+    promises.push(
+      Collection.find({
+        user: req.userId,
+        name: new RegExp(`^${escapeRegex(term)}`, 'i'),
+      })
+        .select('name')
+        .limit(MAX_SUGGESTIONS)
+        .lean()
+        .catch(() => [])
+    );
+
+    const [tokens, tags, collections] = await Promise.all(promises);
+
+    for (const t of tokens) {
+      if (t !== term && t.startsWith(term)) suggestions.add(t);
+    }
+
     for (const t of tags) {
       suggestions.add(`tag:${t._id}`);
     }
 
-    // Collection names.
-    const collections = await Collection.find({
-      user: req.userId,
-      name: new RegExp(`^${escapeRegex(term)}`, 'i'),
-    })
-      .select('name')
-      .limit(MAX_SUGGESTIONS);
     for (const c of collections) {
       suggestions.add(`collection:${c.name}`);
     }

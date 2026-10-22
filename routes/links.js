@@ -578,14 +578,19 @@ router.get('/', async (req, res) => {
     const sort = req.query.sort;
 
     if (!hasText) {
-      const total = await Link.countDocuments(scoped);
-      const links = await Link.find(scoped).sort(sortOption(sort)).skip(skip).limit(limit);
+      const [total, links] = await Promise.all([
+        Link.countDocuments(scoped),
+        Link.find(scoped).sort(sortOption(sort)).skip(skip).limit(limit).lean(),
+      ]);
       return res.json({ links, total, parsed: describeAst(ast) });
     }
 
     // Text search: pull the matching candidates (index-backed), rank them and
     // paginate the ranked list.
-    const candidates = await Link.find(scoped).sort({ createdAt: -1 }).limit(MAX_RANK_CANDIDATES);
+    const candidates = await Link.find(scoped)
+      .sort({ createdAt: -1 })
+      .limit(MAX_RANK_CANDIDATES)
+      .lean();
 
     let ranked = candidates
       .filter((doc) => matchesPhrases(doc, phrases))
@@ -602,7 +607,8 @@ router.get('/', async (req, res) => {
       const relaxedScope = applyArchiveScope(relaxed, ast, base);
       const pool = await Link.find(relaxedScope)
         .sort({ createdAt: -1 })
-        .limit(MAX_RANK_CANDIDATES);
+        .limit(MAX_RANK_CANDIDATES)
+        .lean();
 
       const fuzzyRanked = pool
         .filter((doc) => matchesQuery(doc, ast, { collectionIds, fuzzy: true }))
@@ -732,11 +738,13 @@ router.get('/trash', async (req, res) => {
     const ast = parseQuery(req.query.q || '');
     const { filter } = compileAst(ast, base);
 
-    const total = await Link.countDocuments(filter);
     const sort = sortOption(req.query.sort);
     const limit = parseLimit(req.query.limit, { def: 50 });
     const skip = Math.min(Math.max(parseInt(req.query.skip, 10) || 0, 0), 100000);
-    const links = await Link.find(filter).sort(sort).skip(skip).limit(limit);
+    const [total, links] = await Promise.all([
+      Link.countDocuments(filter),
+      Link.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+    ]);
     res.json({ links, total });
   } catch (err) {
     console.error(err);
@@ -767,8 +775,10 @@ router.get('/archived', async (req, res) => {
     const skip = Math.min(Math.max(parseInt(req.query.skip, 10) || 0, 0), 100000);
 
     const filter = { user: req.userId, deletedAt: null, archivedAt: { $ne: null } };
-    const total = await Link.countDocuments(filter);
-    const links = await Link.find(filter).sort({ archivedAt: -1 }).skip(skip).limit(limit);
+    const [total, links] = await Promise.all([
+      Link.countDocuments(filter),
+      Link.find(filter).sort({ archivedAt: -1 }).skip(skip).limit(limit).lean(),
+    ]);
 
     res.json({ links, total });
   } catch (err) {
@@ -784,12 +794,15 @@ router.get('/merged', async (req, res) => {
     const skip = Math.min(Math.max(parseInt(req.query.skip, 10) || 0, 0), 100000);
 
     const filter = { user: req.userId, deletedAt: null, mergedInto: { $ne: null } };
-    const total = await Link.countDocuments(filter);
-    const links = await Link.find(filter)
-      .sort({ updatedAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate('mergedInto', 'title url');
+    const [total, links] = await Promise.all([
+      Link.countDocuments(filter),
+      Link.find(filter)
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('mergedInto', 'title url')
+        .lean(),
+    ]);
 
     res.json({ links, total });
   } catch (err) {
@@ -1209,7 +1222,8 @@ router.get('/:id/article', async (req, res) => {
   if (!isObjectId(req.params.id)) return res.status(400).json({ error: 'Invalid link id.' });
   try {
     const link = await Link.findOne({ _id: req.params.id, user: req.userId, deletedAt: null })
-      .select('+article.text');
+      .select('+article.text')
+      .lean();
     if (!link) return res.status(404).json({ error: 'Link not found.' });
 
     res.json({
