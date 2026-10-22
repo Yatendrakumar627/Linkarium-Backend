@@ -178,12 +178,12 @@ async function getVisitHeatmap(userId, options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
 
   const id = new mongoose.Types.ObjectId(userId);
-  const ids = await linkIds(id);
-  if (ids.length === 0) {
-    return { weeks, cells: [], totals: { visits: 0, days: 0 }, max: 0 };
-  }
 
   const since = new Date(now.getTime() - weeks * 7 * DAY_MS);
+  // Visits are always scoped to the user and pruned when their link is
+  // permanently deleted (see links.js / cleanupTrash), so there is no need to
+  // load every link id just to check for an empty account. A user with no
+  // visits simply produces an all-zero grid.
   const visits = await Visit.find({ user: id, visitedAt: { $gte: since } }).select('visitedAt').lean();
 
   // Bucket the visits by local day.
