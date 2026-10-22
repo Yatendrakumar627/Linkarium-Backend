@@ -56,6 +56,9 @@ const userSchema = new mongoose.Schema(
       defaultView: { type: String, default: 'dashboard' },
       // Fetch OpenGraph/article metadata when a link is saved.
       autoEnrich: { type: Boolean, default: true },
+      // When the last digest email was sent. Used to avoid sending twice when
+      // a scheduler run is delayed past the target hour.
+      lastDigestAt: { type: Date, default: null },
     },
   },
   {

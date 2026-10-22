@@ -65,7 +65,7 @@ describe('compileAst', () => {
     const ast = parseQuery('tag:ai is:favorite');
     const { filter } = compileAst(ast, { user: 'u1', deletedAt: null });
     assert.strictEqual(filter.$and[0].user, 'u1');
-    assert.deepStrictEqual(filter.$and[1], { tags: { $in: ['ai'] } });
+    assert.deepStrictEqual(filter.$and[1], { tags: { $all: ['ai'] } });
     assert.deepStrictEqual(filter.$and[2], { favorite: true });
   });
 
@@ -82,6 +82,12 @@ describe('compileAst', () => {
   test('a query without free text is not a text query', () => {
     const { hasText } = compileAst(parseQuery('tag:ai'), { user: 'u1' });
     assert.strictEqual(hasText, false);
+  });
+
+  test('multiple tags require every tag, not just one of them', () => {
+    const ast = parseQuery('tag:ai tag:react');
+    const { filter } = compileAst(ast, { user: 'u1' });
+    assert.deepStrictEqual(filter.$and[1], { tags: { $all: ['ai', 'react'] } });
   });
 
   test('exclusions are compiled as a negated token match', () => {

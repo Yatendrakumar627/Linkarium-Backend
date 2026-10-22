@@ -83,24 +83,34 @@ function computeActions(link, actions = {}) {
   const $addToSet = {};
   const $pull = {};
 
+  const current = Array.isArray(link.tags) ? link.tags.slice() : [];
+  let nextTags = current;
+
   if (Array.isArray(actions.addTags) && actions.addTags.length) {
     const tags = normalizeTags(actions.addTags);
-    const current = Array.isArray(link.tags) ? link.tags : [];
-    const missing = tags.filter((t) => !current.includes(t));
-    if (missing.length) {
-      $addToSet.tags = { $each: missing };
-      patch.tags = [...current, ...missing];
-    }
+    nextTags = [...nextTags, ...tags.filter((t) => !nextTags.includes(t))];
   }
 
   if (Array.isArray(actions.removeTags) && actions.removeTags.length) {
-    const tags = normalizeTags(actions.removeTags);
-    const current = Array.isArray(link.tags) ? link.tags : [];
-    const present = tags.filter((t) => current.includes(t));
-    if (present.length) {
-      $pull.tags = { $in: present };
-      patch.tags = current.filter((t) => !present.includes(t));
-    }
+    const remove = new Set(normalizeTags(actions.removeTags));
+    nextTags = nextTags.filter((t) => !remove.has(t));
+  }
+
+  const toAdd = nextTags.filter((t) => !current.includes(t));
+  const toRemove = current.filter((t) => !nextTags.includes(t));
+
+  // Mongo refuses to update the same path with two operators ($addToSet and
+  // $pull) in one update. When a rule both adds and removes tags, write the
+  // computed result in a single $set instead.
+  if (toAdd.length && toRemove.length) {
+    update.$set = { ...(update.$set || {}), tags: nextTags };
+    patch.tags = nextTags;
+  } else if (toAdd.length) {
+    $addToSet.tags = { $each: toAdd };
+    patch.tags = nextTags;
+  } else if (toRemove.length) {
+    $pull.tags = { $in: toRemove };
+    patch.tags = nextTags;
   }
 
   if (actions.collectionId) {

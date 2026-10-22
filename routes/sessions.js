@@ -26,7 +26,15 @@ function currentSessionId(req) {
 // GET /api/sessions — the devices that are signed in.
 router.get('/', async (req, res) => {
   try {
-    const sessions = await Session.find({ user: req.userId, revokedAt: null, expiresAt: { $gt: new Date() } })
+    const sessions = await Session.find({
+      user: req.userId,
+      revokedAt: null,
+      // A rotated token has been superseded by a newer one for the same
+      // signed-in device. Listing it would show duplicate devices after every
+      // refresh.
+      rotatedAt: null,
+      expiresAt: { $gt: new Date() },
+    })
       .sort({ lastUsedAt: -1 })
       .select('jti device userAgent ip lastUsedAt createdAt expiresAt')
       .lean();

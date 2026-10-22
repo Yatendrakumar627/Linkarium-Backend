@@ -4,6 +4,7 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const Link = require('../models/Link');
+const User = require('../models/User');
 const Visit = require('../models/Visit');
 const Collection = require('../models/Collection');
 const auth = require('../middleware/auth');
@@ -13,7 +14,7 @@ const { isObjectId, isHexColor, parseLimit } = require('../utils/validators');
 const { isHttpUrl } = require('../utils/metadata');
 const { canonicalizeUrl } = require('../utils/canonical');
 const { parseQuery, compileAst, scoreLink, matchesPhrases, matchesQuery, describeAst } = require('../utils/querylang');
-const { escapeRegex } = require('../utils/text');
+const { escapeRegex, buildSearchTokens } = require('../utils/text');
 const { applyRulesToLink } = require('../utils/rules');
 const { fetchAndExtract, buildEnrichment } = require('../utils/enrichment');
 
@@ -73,6 +74,55 @@ function applyArchiveScope(filter, ast, base) {
     return filter;
   }
   return { $and: [filter, { archivedAt: null }] };
+}
+
+/** Does this user want links enriched automatically? Defaults to yes. */
+async function wantsAutoEnrich(userId) {
+  const user = await User.findById(userId).select('preferences.autoEnrich').lean();
+  return user?.preferences?.autoEnrich !== false;
+}
+
+/**
+ * Fetch preview metadata for a freshly saved or re-pointed link.
+ *
+ * Runs outside the request so saving stays fast. Honours the user's
+ * `autoEnrich` preference, and rebuilds the article token index so
+ * full-text search can find the body immediately (the 15-minute worker only
+ * looks at links that have not been enriched yet).
+ */
+function enrichLinkInBackground(link) {
+  setImmediate(async () => {
+    try {
+      if (!(await wantsAutoEnrich(link.user))) return;
+
+      const extraction = await fetchAndExtract(link.url);
+      if (!extraction.ok) return;
+
+      const { og, article } = buildEnrichment(extraction, new Date());
+      const update = { og, article };
+      update.articleTokens = article.text
+        ? buildSearchTokens({ title: article.text }, { limit: 400 })
+        : [];
+
+      // Only auto-fill the description when the user has not written one.
+      if (!link.description && og.description) {
+        update.description = og.description;
+        // This update bypasses the model hook, so rebuild the metadata index
+        // with the newly filled description.
+        update.tokens = buildSearchTokens({
+          title: link.title,
+          description: og.description,
+          tags: link.tags,
+          url: link.url,
+          note: link.note,
+        });
+      }
+
+      await Link.updateOne({ _id: link._id }, { $set: update });
+    } catch {
+      // Best-effort; the periodic worker will try again.
+    }
+  });
 }
 
 // Collections referenced by name inside a query ("collection:Work") are
@@ -702,24 +752,9 @@ router.post('/', async (req, res) => {
       console.error('[rules] could not be applied:', ruleErr.message);
     }
 
-    // Instantly enrich the link in background (extract og:image, description, article text)
-    // so it doesn't have to wait for the periodic cron worker.
-    setImmediate(async () => {
-      try {
-        const extraction = await fetchAndExtract(link.url);
-        if (extraction.ok) {
-          const { og, article } = buildEnrichment(extraction, new Date());
-          const update = { og, article };
-          // If user didn't write a custom description, auto-fill with the extracted summary
-          if (!link.description && og.description) {
-            update.description = og.description;
-          }
-          await Link.updateOne({ _id: link._id }, { $set: update });
-        }
-      } catch (enrichErr) {
-        // Best-effort; background worker will catch it later
-      }
-    });
+    // Instantly enrich the link in background (extract og:image, description,
+    // article text) so it does not have to wait for the periodic worker.
+    enrichLinkInBackground(link);
 
     res.status(201).json(link);
   } catch (err) {
@@ -736,7 +771,13 @@ router.get('/trash', async (req, res) => {
   try {
     const base = { user: req.userId, deletedAt: { $ne: null } };
     const ast = parseQuery(req.query.q || '');
-    const { filter } = compileAst(ast, base);
+    // Trash is a list like any other: collection: filters have to be resolved
+    // to ids here too, otherwise compileAst silently drops them.
+    let collectionIds = null;
+    if (ast.collections.length) {
+      collectionIds = await resolveCollectionNames(req.userId, ast.collections);
+    }
+    const { filter } = compileAst(ast, base, { collectionIds });
 
     const sort = sortOption(req.query.sort);
     const limit = parseLimit(req.query.limit, { def: 50 });
@@ -1277,6 +1318,7 @@ router.patch('/:id', async (req, res) => {
     }
 
     if (title !== undefined) link.title = String(title).trim();
+    let urlChanged = false;
     if (url !== undefined) {
       const newUrl = normalizeUrl(url);
       if (!isHttpUrl(newUrl)) {
@@ -1303,6 +1345,7 @@ router.patch('/:id', async (req, res) => {
           },
         });
       }
+      urlChanged = newUrl !== link.url;
       link.url = newUrl;
     }
     if (description !== undefined) link.description = String(description).trim();
@@ -1314,7 +1357,40 @@ router.patch('/:id', async (req, res) => {
     if (collectionId !== undefined) link.collectionId = collectionId || null;
     if (tags !== undefined) link.tags = normalizeTags(tags);
 
+    if (urlChanged) {
+      // Preview metadata belongs to the old URL. Reset it (and the health
+      // verdict) rather than showing the old page's title/image for a new
+      // address.
+      const autoDescription = Boolean(link.og?.description) && link.description === link.og.description;
+      link.og = {
+        title: '',
+        description: '',
+        image: '',
+        favicon: '',
+        siteName: '',
+        type: '',
+        fetchedAt: null,
+        error: '',
+      };
+      link.article = { text: '', wordCount: 0, extractedAt: null };
+      link.articleTokens = [];
+      link.health = {
+        status: 'unknown',
+        httpStatus: null,
+        error: null,
+        errorKind: null,
+        checkedAt: null,
+        lastOkAt: null,
+        nextCheckAt: null,
+        failures: 0,
+        latencyMs: null,
+        finalUrl: null,
+      };
+      if (autoDescription) link.description = '';
+    }
+
     await link.save();
+    if (urlChanged) enrichLinkInBackground(link);
     res.json(link);
   } catch (err) {
     if (err?.code === 11000) {

@@ -79,7 +79,8 @@ router.post('/cron', requireSecret, async (req, res) => {
 router.get('/cron', requireSecret, async (req, res) => {
   try {
     const force = req.query.force === '1' || req.query.force === 'true';
-    const results = await runDueTasks({ force });
+    const only = req.query.task ? String(req.query.task).split(',').map((t) => t.trim()) : null;
+    const results = await runDueTasks({ only, force });
     res.json({
       ok: true,
       ran: results.filter((r) => r.ran).length,

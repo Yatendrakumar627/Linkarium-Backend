@@ -31,9 +31,17 @@ const REFRESH_COOKIE_OPTS = {
   httpOnly: true,
   secure: SECURE_COOKIES,
   sameSite: SECURE_COOKIES ? 'none' : 'lax',
-  path: '/api/auth',
+  // The refresh cookie must be readable by every authenticated API route, not
+  // only /api/auth. The session routes need it to tell which device is
+  // "current" when revoking the others.
+  path: '/api',
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
+
+// Refreshes can race: React StrictMode boots the app twice, and several tabs
+// can refresh at the same moment. A token used twice inside this window is a
+// benign race, not a stolen token.
+const REFRESH_REUSE_GRACE_MS = 30 * 1000;
 
 // How long a login challenge stays valid.
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -41,11 +49,23 @@ const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const MAX_CHALLENGE_ATTEMPTS = 5;
 
 function setRefreshCookie(res, token) {
+  // Remove the cookie issued by older builds (path /api/auth) so the browser
+  // does not send two `rt` cookies after this deploy.
+  res.clearCookie(REFRESH_COOKIE_NAME, {
+    ...REFRESH_COOKIE_OPTS,
+    path: '/api/auth',
+    maxAge: 0,
+  });
   res.cookie(REFRESH_COOKIE_NAME, token, REFRESH_COOKIE_OPTS);
 }
 
 function clearRefreshCookie(res) {
   res.clearCookie(REFRESH_COOKIE_NAME, { ...REFRESH_COOKIE_OPTS, maxAge: 0 });
+  res.clearCookie(REFRESH_COOKIE_NAME, {
+    ...REFRESH_COOKIE_OPTS,
+    path: '/api/auth',
+    maxAge: 0,
+  });
 }
 
 /**
@@ -246,6 +266,7 @@ router.post('/refresh', async (req, res) => {
 
     // Refresh-token reuse detection & revocation check
     let session = null;
+    let benignRace = false;
     if (payload.jti) {
       session = await Session.findOne({ jti: payload.jti });
       if (session?.revokedAt) {
@@ -253,14 +274,22 @@ router.post('/refresh', async (req, res) => {
         return res.status(401).json({ error: 'This session has been revoked. Please sign in again.' });
       }
       if (session?.rotatedAt) {
-        await Session.updateMany({ user: payload.id, revokedAt: null }, { $set: { revokedAt: new Date() } });
-        user.tokenVersion = (user.tokenVersion || 0) + 1;
-        await user.save();
-        invalidateTokenVersion(payload.id);
-        clearRefreshCookie(res);
-        return res.status(401).json({
-          error: 'This session was signed out because the refresh token was reused. Please sign in again.',
-        });
+        const rotatedAt = new Date(session.rotatedAt).getTime();
+        if (Date.now() - rotatedAt <= REFRESH_REUSE_GRACE_MS) {
+          // Two tabs (or StrictMode's double bootstrap) refreshed at the same
+          // time. Both are legitimate; issue a fresh pair instead of logging
+          // the user out of every device.
+          benignRace = true;
+        } else {
+          await Session.updateMany({ user: payload.id, revokedAt: null }, { $set: { revokedAt: new Date() } });
+          user.tokenVersion = (user.tokenVersion || 0) + 1;
+          await user.save();
+          invalidateTokenVersion(payload.id);
+          clearRefreshCookie(res);
+          return res.status(401).json({
+            error: 'This session was signed out because the refresh token was reused. Please sign in again.',
+          });
+        }
       }
     }
 
@@ -270,7 +299,10 @@ router.post('/refresh', async (req, res) => {
     setRefreshCookie(res, newRefresh);
 
     if (session) {
-      session.rotatedAt = new Date();
+      // In a benign race the original session stays rotated (do not reset
+      // rotatedAt, or a stolen token could keep extending its own grace
+      // window). It is simply no longer the current session.
+      if (!benignRace) session.rotatedAt = new Date();
       session.lastUsedAt = new Date();
       await session.save();
     }

@@ -42,15 +42,19 @@ router.get('/summary', async (req, res) => {
 // GET /api/analytics/recently-visited
 router.get('/recently-visited', async (req, res) => {
   try {
+    // Over-fetch a little and then trim: the limit must not be spent on
+    // visits whose link has since been deleted (populate yields null for
+    // those), or the sidebar can show fewer than eight recent pages.
     const visits = await Visit.find({ user: req.userId })
       .sort({ visitedAt: -1 })
-      .limit(8)
-      .populate('link', 'title url color collectionId tags favorite')
+      .limit(50)
+      .populate({ path: 'link', match: { deletedAt: null }, select: 'title url color collectionId tags favorite' })
       .lean();
 
     res.json(
       visits
         .filter((v) => v.link)
+        .slice(0, 8)
         .map((v) => ({
           id: v._id,
           visitedAt: v.visitedAt,

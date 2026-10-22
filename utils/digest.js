@@ -42,12 +42,13 @@ async function collectDigestData(userId, options = {}) {
 
   const base = { user: userId, deletedAt: null, archivedAt: null };
 
-  const [newLinks, totalLinks, visitsThisWeek, topTags, forgotten, neverOpened] = await Promise.all([
+  const [newLinks, newLinksCount, totalLinks, visitsThisWeek, topTags, forgotten, neverOpened] = await Promise.all([
     Link.find({ ...base, createdAt: { $gte: weekAgo } })
       .sort({ createdAt: -1 })
       .limit(MAX_ITEMS)
       .select('title url tags createdAt')
       .lean(),
+    Link.countDocuments({ ...base, createdAt: { $gte: weekAgo } }),
     Link.countDocuments(base),
     Visit.countDocuments({ link: { $in: await linkIds(userId) }, createdAt: { $gte: weekAgo } }),
     Link.aggregate([
@@ -73,6 +74,7 @@ async function collectDigestData(userId, options = {}) {
     now,
     weekAgo,
     newLinks,
+    newLinksCount,
     totalLinks,
     visitsThisWeek,
     topTags: topTags.map((t) => ({ tag: t._id, count: t.count })),
@@ -97,7 +99,7 @@ async function linkIds(userId) {
 function renderDigest(data, options = {}) {
   const appUrl = (options.appUrl || process.env.CLIENT_ORIGIN || '').replace(/\/$/, '');
 
-  const newCount = data.newLinks.length;
+  const newCount = data.newLinksCount ?? data.newLinks.length;
   const subject = `Your Linkarium week — ${newCount} new link${newCount === 1 ? '' : 's'}, ${data.visitsThisWeek} visit${
     data.visitsThisWeek === 1 ? '' : 's'
   }`;
@@ -145,7 +147,7 @@ function renderDigest(data, options = {}) {
   const htmlSections = [];
   htmlSections.push(`<h1>Your Linkarium week</h1>`);
   htmlSections.push(
-    `<p>${data.newLinks.length} new link${data.newLinks.length === 1 ? '' : 's'}, ${data.visitsThisWeek} visit${
+    `<p>${newCount} new link${newCount === 1 ? '' : 's'}, ${data.visitsThisWeek} visit${
       data.visitsThisWeek === 1 ? '' : 's'
     }, ${data.totalLinks} links in total.</p>`
   );

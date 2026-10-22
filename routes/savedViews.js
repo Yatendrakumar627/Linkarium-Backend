@@ -7,6 +7,7 @@ const { isObjectId, isHexColor } = require('../utils/validators');
 const { parseQuery, describeAst, compileAst } = require('../utils/querylang');
 const { runRule } = require('../utils/rules');
 const { normalizeTags } = require('../utils/helpers');
+const { escapeRegex } = require('../utils/text');
 
 const router = express.Router();
 
@@ -24,8 +25,15 @@ const MAX_QUERY = 500;
 async function countMatches(userId, ast) {
   let collectionIds = null;
   if (ast.collections.length) {
-    const names = ast.collections;
-    const docs = await Collection.find({ user: userId, name: { $in: names } })
+    // Mirror the search route: names match case-insensitively, and raw ids
+    // are accepted too (the quick filters use ids for names that contain
+    // whitespace).
+    const byNameOrId = ast.collections.map((name) =>
+      isObjectId(name)
+        ? { _id: name }
+        : { name: new RegExp(`^${escapeRegex(name)}$`, 'i') }
+    );
+    const docs = await Collection.find({ user: userId, $or: byNameOrId })
       .select('_id')
       .lean();
     collectionIds = docs.map((d) => String(d._id));
@@ -35,7 +43,18 @@ async function countMatches(userId, ast) {
 
   const base = { user: userId, deletedAt: null };
   const { filter } = compileAst(ast, base, { collectionIds });
-  return Link.countDocuments(filter);
+
+  // The regular list hides archived links unless the query asks about them.
+  // The preview has to do the same or it reports a larger number than the
+  // view it describes.
+  const archivedFlag =
+    ast.flags.includes('archived') ||
+    ast.flags.includes('unarchived') ||
+    ast.flags.includes('duplicate') ||
+    ast.flags.includes('merged');
+  const scoped = archivedFlag ? filter : { $and: [filter, { archivedAt: null }] };
+
+  return Link.countDocuments(scoped);
 }
 
 /** The name a saved view is shown under. */

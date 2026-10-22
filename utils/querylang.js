@@ -355,7 +355,9 @@ function compileAst(ast, base = {}, options = {}) {
   const and = [];
 
   if (ast.tags.length) {
-    and.push({ tags: { $in: ast.tags } });
+    // Every tag in the query must be present — the same semantics as the
+    // in-memory matcher used by automation rules. `$in` would OR them.
+    and.push({ tags: { $all: ast.tags } });
   }
 
   if (ast.domains.length) {

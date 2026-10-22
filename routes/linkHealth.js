@@ -25,7 +25,7 @@ router.get('/summary', async (req, res) => {
   try {
     const base = { user: req.userId, deletedAt: null, archivedAt: null };
 
-    const [healthy, broken, unknown, stale, neverChecked, archived] = await Promise.all([
+    const [healthy, broken, unknown, stale, neverChecked, archived, total] = await Promise.all([
       Link.countDocuments({ ...base, 'health.status': 'healthy' }),
       Link.countDocuments({ ...base, 'health.status': 'broken' }),
       Link.countDocuments({ ...base, 'health.status': 'unknown' }),
@@ -38,9 +38,10 @@ router.get('/summary', async (req, res) => {
       }),
       Link.countDocuments({ ...base, 'health.checkedAt': null }),
       Link.countDocuments({ user: req.userId, deletedAt: null, archivedAt: { $ne: null } }),
+      // Never sum the status buckets: `neverChecked` overlaps `unknown`, so
+      // the total came out too high.
+      Link.countDocuments(base),
     ]);
-
-    const total = healthy + broken + unknown + neverChecked;
 
     res.json({ total, healthy, broken, unknown, stale, neverChecked, archived });
   } catch (err) {

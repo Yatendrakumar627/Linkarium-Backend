@@ -57,12 +57,22 @@ async function authenticateApiKey(token) {
 }
 
 module.exports = async function auth(req, res, next) {
+  // Accept both the standard bearer header and the `X-API-Key` header used by
+  // the browser extension. The latter is the conventional way to send a
+  // personal access key and does not collide with the access token.
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Not authorized. Missing token.' });
+  let token = header && header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+
+  if (!token) {
+    const apiKeyHeader = req.headers['x-api-key'];
+    if (typeof apiKeyHeader === 'string' && apiKeyHeader.trim()) {
+      token = apiKeyHeader.trim();
+    }
   }
 
-  const token = header.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ error: 'Not authorized. Missing token.' });
+  }
 
   // --- Personal access key ---
   if (token.startsWith('lk_')) {

@@ -8,6 +8,7 @@
 // small amount of concurrency) so a run never holds the lease for long.
 
 const Link = require('../../models/Link');
+const User = require('../../models/User');
 const { fetchAndExtract, buildEnrichment } = require('../../utils/enrichment');
 const { buildSearchTokens } = require('../../utils/text');
 
@@ -46,7 +47,16 @@ async function enrichDueLinks(options = {}) {
 
   const staleBefore = new Date(now - REFRESH_AFTER_MS);
 
+  // Only enrich links whose owner has not opted out. The default (a missing
+  // preference) is enabled.
+  const optedIn = await User.find({ 'preferences.autoEnrich': { $ne: false } })
+    .select('_id')
+    .lean();
+  if (optedIn.length === 0) return { enriched: 0, failed: 0 };
+  const userIds = optedIn.map((u) => u._id);
+
   const due = await Link.find({
+    user: { $in: userIds },
     deletedAt: null,
     $or: [
       { 'og.fetchedAt': null },

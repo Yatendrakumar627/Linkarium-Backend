@@ -68,38 +68,51 @@ function createRateLimitStore(namespace, windowMs) {
       const nowDate = new Date(now);
       const resetTime = now + windowMs;
 
-      // Fast path: the current window is still open, so just bump the counter.
-      const active = await RateLimit.findOneAndUpdate(
-        { _id: id, resetAt: { $gt: nowDate } },
-        { $inc: { count: 1 } },
-        { returnDocument: 'after' }
-      );
-      if (active) {
-        return { totalHits: active.count, resetTime: active.resetAt };
+      // One atomic operation handles both cases: an open window is
+      // incremented, an expired (or missing) window starts at 1. The previous
+      // two-step version could let two concurrent requests both reset the
+      // window, so one of them was not counted.
+      const pipeline = [
+        {
+          $set: {
+            count: {
+              $cond: [
+                { $gt: ['$resetAt', nowDate] },
+                { $add: ['$count', 1] },
+                1,
+              ],
+            },
+            resetAt: {
+              $cond: [
+                { $gt: ['$resetAt', nowDate] },
+                '$resetAt',
+                new Date(resetTime),
+              ],
+            },
+          },
+        },
+      ];
+
+      let fresh;
+      try {
+        fresh = await RateLimit.findOneAndUpdate(
+          { _id: id },
+          pipeline,
+          // Mongoose only treats an array update as an aggregation pipeline
+          // when this option is set.
+          { upsert: true, returnDocument: 'after', updatePipeline: true }
+        );
+      } catch (err) {
+        if (err?.code !== 11000) throw err;
+        // A concurrent request inserted the counter first; increment it.
+        fresh = await RateLimit.findOneAndUpdate(
+          { _id: id },
+          pipeline,
+          { returnDocument: 'after', updatePipeline: true }
+        );
       }
 
-      // The window expired (or this is the first hit): start a fresh window.
-      try {
-        const fresh = await RateLimit.findOneAndUpdate(
-          { _id: id },
-          { $set: { count: 1, resetAt: new Date(resetTime) } },
-          { upsert: true, returnDocument: 'after' }
-        );
-        return { totalHits: fresh.count, resetTime: fresh.resetAt };
-      } catch (err) {
-        if (err?.code === 11000) {
-          // A concurrent request created the document first — bump it instead.
-          const again = await RateLimit.findOneAndUpdate(
-            { _id: id },
-            { $inc: { count: 1 } },
-            { returnDocument: 'after' }
-          );
-          if (again) {
-            return { totalHits: again.count, resetTime: again.resetAt };
-          }
-        }
-        throw err;
-      }
+      return { totalHits: fresh.count, resetTime: fresh.resetAt };
     },
 
     async decrement(key) {
