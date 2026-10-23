@@ -4,6 +4,12 @@ const Link = require('../models/Link');
 const Collection = require('../models/Collection');
 const Visit = require('../models/Visit');
 const auth = require('../middleware/auth');
+const {
+  safeTimeZone,
+  makeDateFormatter,
+  startOfDayInTz,
+  formatDayLabel,
+} = require('../utils/timezone');
 
 const router = express.Router();
 
@@ -13,25 +19,54 @@ router.use(auth);
 router.get('/summary', async (req, res) => {
   try {
     const id = new mongoose.Types.ObjectId(req.userId);
-    const [links, favorites, visits, collections, trashCount, uncategorized] = await Promise.all([
-      Link.countDocuments({ user: req.userId, deletedAt: null }),
-      Link.countDocuments({ user: req.userId, favorite: true, deletedAt: null }),
+
+    // One pass over the user's links replaces six separate countDocuments
+    // round-trips. Each counter is a conditional sum, so the whole summary is a
+    // single aggregation; collections still live in their own collection.
+    const [countsAgg, collections] = await Promise.all([
       Link.aggregate([
-        { $match: { user: id, deletedAt: null } },
-        { $group: { _id: null, total: { $sum: '$visits' } } },
+        { $match: { user: id } },
+        {
+          $group: {
+            _id: null,
+            totalLinks: { $sum: { $cond: [{ $eq: ['$deletedAt', null] }, 1, 0] } },
+            favoriteLinks: {
+              $sum: {
+                $cond: [
+                  { $and: [{ $eq: ['$deletedAt', null] }, { $eq: ['$favorite', true] }] },
+                  1,
+                  0,
+                ],
+              },
+            },
+            totalVisits: {
+              $sum: { $cond: [{ $eq: ['$deletedAt', null] }, { $ifNull: ['$visits', 0] }, 0] },
+            },
+            trashCount: { $sum: { $cond: [{ $ne: ['$deletedAt', null] }, 1, 0] } },
+            uncategorizedLinks: {
+              $sum: {
+                $cond: [
+                  { $and: [{ $eq: ['$deletedAt', null] }, { $eq: ['$collectionId', null] }] },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
       ]),
       Collection.countDocuments({ user: req.userId }),
-      Link.countDocuments({ user: req.userId, deletedAt: { $ne: null } }),
-      Link.countDocuments({ user: req.userId, collectionId: null, deletedAt: null }),
     ]);
 
+    const counts = countsAgg[0] || {};
+
     res.json({
-      totalLinks: links,
-      favoriteLinks: favorites,
-      totalVisits: visits[0]?.total || 0,
+      totalLinks: counts.totalLinks || 0,
+      favoriteLinks: counts.favoriteLinks || 0,
+      totalVisits: counts.totalVisits || 0,
       totalCollections: collections,
-      trashCount,
-      uncategorizedLinks: uncategorized,
+      trashCount: counts.trashCount || 0,
+      uncategorizedLinks: counts.uncategorizedLinks || 0,
     });
   } catch (err) {
     console.error(err);
@@ -74,6 +109,7 @@ router.get('/top-links', async (req, res) => {
     const links = await Link.find({ user: req.userId, deletedAt: null })
       .sort({ visits: -1, lastVisitedAt: -1 })
       .limit(5)
+      .select('title url description tags favorite color visits lastVisitedAt createdAt collectionId og.image')
       .lean();
     res.json(links);
   } catch (err) {
@@ -125,59 +161,5 @@ router.get('/visits', async (req, res) => {
     res.status(500).json({ error: 'Failed to load visit analytics.' });
   }
 });
-
-function safeTimeZone(tz) {
-  if (!tz) return 'UTC';
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return String(tz);
-  } catch {
-    return 'UTC';
-  }
-}
-
-// Returns a function mapping a Date -> { y, m, d, key, utcOffsetMs } in a given IANA timezone
-function makeDateFormatter(tz) {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  return (date) => {
-    const p = fmt.formatToParts(date);
-    const get = (type) => p.find((x) => x.type === type)?.value;
-    const hour = get('hour') === '24' ? '00' : get('hour');
-    const y = get('year');
-    const m = get('month');
-    const d = get('day');
-    return {
-      y: Number(y),
-      m: Number(m),
-      d: Number(d),
-      key: `${y}-${m}-${d}`,
-      utcOffsetMs:
-        Date.UTC(Number(y), Number(m) - 1, Number(d), Number(hour), Number(get('minute')), Number(get('second'))) -
-        date.getTime(),
-    };
-  };
-}
-
-function startOfDayInTz(y, m, d, tz) {
-  const fmt = makeDateFormatter(tz);
-  let instant = Date.UTC(y, m - 1, d);
-  for (let i = 0; i < 4; i++) {
-    instant = Date.UTC(y, m - 1, d) - fmt(new Date(instant)).utcOffsetMs;
-  }
-  return new Date(instant);
-}
-
-function formatDayLabel(date, tz) {
-  return new Intl.DateTimeFormat(undefined, { timeZone: tz, month: 'short', day: 'numeric' }).format(date);
-}
 
 module.exports = router;

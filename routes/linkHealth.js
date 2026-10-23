@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const Link = require('../models/Link');
 const auth = require('../middleware/auth');
@@ -23,27 +24,91 @@ const checkLimiter = rateLimit({
 // GET /api/link-health/summary — how many links are healthy, broken, unknown…
 router.get('/summary', async (req, res) => {
   try {
-    const base = { user: req.userId, deletedAt: null, archivedAt: null };
+    const staleBefore = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
-    const [healthy, broken, unknown, stale, neverChecked, archived, total] = await Promise.all([
-      Link.countDocuments({ ...base, 'health.status': 'healthy' }),
-      Link.countDocuments({ ...base, 'health.status': 'broken' }),
-      Link.countDocuments({ ...base, 'health.status': 'unknown' }),
-      Link.countDocuments({
-        ...base,
-        $or: [
-          { 'health.lastOkAt': { $lt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
-          { 'health.lastOkAt': null },
-        ],
-      }),
-      Link.countDocuments({ ...base, 'health.checkedAt': null }),
-      Link.countDocuments({ user: req.userId, deletedAt: null, archivedAt: { $ne: null } }),
-      // Never sum the status buckets: `neverChecked` overlaps `unknown`, so
-      // the total came out too high.
-      Link.countDocuments(base),
+    // Every counter is a conditional sum over the same match, so this is one
+    // index-assisted aggregation instead of seven separate count queries.
+    const [counts] = await Link.aggregate([
+      { $match: { user: new mongoose.Types.ObjectId(req.userId), deletedAt: null } },
+      {
+        $group: {
+          _id: null,
+          // The totals only cover active (unarchived) links; archived links are
+          // counted separately and must not be summed into the status buckets.
+          total: { $sum: { $cond: [{ $eq: ['$archivedAt', null] }, 1, 0] } },
+          archived: { $sum: { $cond: [{ $ne: ['$archivedAt', null] }, 1, 0] } },
+          healthy: {
+            $sum: {
+              $cond: [
+                { $and: [{ $eq: ['$archivedAt', null] }, { $eq: ['$health.status', 'healthy'] }] },
+                1,
+                0,
+              ],
+            },
+          },
+          broken: {
+            $sum: {
+              $cond: [
+                { $and: [{ $eq: ['$archivedAt', null] }, { $eq: ['$health.status', 'broken'] }] },
+                1,
+                0,
+              ],
+            },
+          },
+          unknown: {
+            $sum: {
+              $cond: [
+                { $and: [{ $eq: ['$archivedAt', null] }, { $eq: ['$health.status', 'unknown'] }] },
+                1,
+                0,
+              ],
+            },
+          },
+          // `neverChecked` overlaps `unknown`, so it is reported separately
+          // rather than added to the status buckets (that made the total too
+          // high in the first implementation).
+          neverChecked: {
+            $sum: {
+              $cond: [
+                { $and: [{ $eq: ['$archivedAt', null] }, { $eq: ['$health.checkedAt', null] }] },
+                1,
+                0,
+              ],
+            },
+          },
+          stale: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$archivedAt', null] },
+                    {
+                      $or: [
+                        { $lt: ['$health.lastOkAt', staleBefore] },
+                        { $eq: ['$health.lastOkAt', null] },
+                      ],
+                    },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
     ]);
 
-    res.json({ total, healthy, broken, unknown, stale, neverChecked, archived });
+    const value = counts || {};
+    res.json({
+      total: value.total || 0,
+      healthy: value.healthy || 0,
+      broken: value.broken || 0,
+      unknown: value.unknown || 0,
+      stale: value.stale || 0,
+      neverChecked: value.neverChecked || 0,
+      archived: value.archived || 0,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong.' });

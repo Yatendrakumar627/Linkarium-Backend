@@ -174,6 +174,13 @@ linkSchema.index(
 // Listing queries: user + not-deleted, ordered by creation date.
 linkSchema.index({ user: 1, deletedAt: 1, createdAt: -1 });
 
+// Sidebar counters and filtered lists. Each of these keeps a very common
+// predicate (favourites, health state, collection membership) inside the
+// index instead of filtering the user's whole link set after the fact.
+linkSchema.index({ user: 1, deletedAt: 1, favorite: 1 });
+linkSchema.index({ user: 1, deletedAt: 1, 'health.status': 1 });
+linkSchema.index({ user: 1, deletedAt: 1, collectionId: 1 });
+
 // Search: token prefix lookups and domain filters stay index-backed.
 linkSchema.index({ user: 1, tokens: 1 });
 linkSchema.index({ user: 1, host: 1 });

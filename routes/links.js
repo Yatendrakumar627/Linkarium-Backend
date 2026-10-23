@@ -27,6 +27,25 @@ router.use(auth);
 // memory.
 const MAX_RANK_CANDIDATES = 1000;
 
+// Derived fields that exist only to power search / duplicate detection. They
+// are never read by the client, and the token arrays in particular make list
+// responses several times larger than they need to be.
+const LIST_EXCLUDE = '-tokens -articleTokens -titleLower -canonicalUrl -host -hostLabel';
+
+// Same fields, as a plain-object cleanup for the search path (which needs the
+// tokens while it ranks, then strips them before responding).
+function toListLink(doc) {
+  if (!doc) return doc;
+  const out = { ...doc };
+  delete out.tokens;
+  delete out.articleTokens;
+  delete out.titleLower;
+  delete out.canonicalUrl;
+  delete out.host;
+  delete out.hostLabel;
+  return out;
+}
+
 // Legacy query parameters (tag/collection/favorite/deleted) still work and
 // are merged with the parsed query language.
 function buildBaseFilter(req) {
@@ -276,14 +295,11 @@ router.post('/import', importLimiter, upload.single('file'), async (req, res) =>
     let imported = 0;
     let skipped = 0;
     const seenUrls = new Set();
+    const seenCanonical = new Set();
+    const prepared = [];
 
-    // Pre-load or create collections by name
-    const collectionMap = {};
-    const existingCollections = await Collection.find({ user: req.userId });
-    for (const c of existingCollections) {
-      collectionMap[c.name.toLowerCase()] = c._id;
-    }
-
+    // Validate and de-duplicate the file in memory first, so the database only
+    // sees the rows that can actually be inserted.
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const rowNum = i + 2;
@@ -293,58 +309,115 @@ router.post('/import', importLimiter, upload.single('file'), async (req, res) =>
         continue;
       }
 
-      // Resolve collection
-      let collectionId = null;
-      if (row.collection) {
-        const key = row.collection.toLowerCase();
-        if (collectionMap[key]) {
-          collectionId = collectionMap[key];
-        } else {
-          const created = await Collection.create({
-            name: row.collection,
-            color: randomColor(),
-            user: req.userId,
-          });
-          collectionId = created._id;
-          collectionMap[key] = created._id;
-        }
-      }
-
-      // Parse tags
-      const tags = row.tagsRaw
-        ? row.tagsRaw.split(',').map((t) => t.trim()).filter(Boolean)
-        : [];
-
       const url = normalizeUrl(row.url);
       if (!url || !isHttpUrl(url)) {
         errors.push(`Row ${rowNum}: Invalid URL (only http/https links can be imported).`);
         continue;
       }
-      if (seenUrls.has(url)) {
-        skipped++;
-        continue;
-      }
-      const duplicate = await findDuplicateUrl(req.userId, url);
-      if (duplicate) {
+
+      const canonical = canonicalizeUrl(url)?.canonical || url;
+      if (seenUrls.has(url) || seenCanonical.has(canonical)) {
         skipped++;
         continue;
       }
       seenUrls.add(url);
+      seenCanonical.add(canonical);
 
-      try {
-        await Link.create({
+      const tags = row.tagsRaw
+        ? row.tagsRaw.split(',').map((t) => t.trim()).filter(Boolean)
+        : [];
+
+      prepared.push({
+        rowNum,
+        collection: row.collection,
+        canonical,
+        doc: {
           user: req.userId,
           title: row.title || row.url,
           url,
           description: row.description || '',
-          collectionId,
+          collectionId: null,
           tags: normalizeTags(tags),
           favorite: false,
           color: randomColor(),
-        });
-        imported++;
+        },
+      });
+    }
+
+    // Resolve collections, creating only the names that do not exist yet (in
+    // one round-trip instead of one per row).
+    const existingCollections = await Collection.find({ user: req.userId }).select('name').lean();
+    const collectionMap = new Map(existingCollections.map((c) => [c.name.toLowerCase(), c._id]));
+    const missingCollections = new Map();
+    for (const item of prepared) {
+      if (!item.collection) continue;
+      const key = item.collection.toLowerCase();
+      if (!collectionMap.has(key) && !missingCollections.has(key)) {
+        missingCollections.set(key, item.collection);
+      }
+    }
+    if (missingCollections.size) {
+      const created = await Collection.insertMany(
+        [...missingCollections.values()].map((name) => ({
+          name,
+          color: randomColor(),
+          user: req.userId,
+        }))
+      );
+      for (const c of created) collectionMap.set(c.name.toLowerCase(), c._id);
+    }
+    for (const item of prepared) {
+      if (item.collection) {
+        item.doc.collectionId = collectionMap.get(item.collection.toLowerCase()) || null;
+      }
+    }
+
+    // One query checks every candidate URL against the existing library,
+    // replacing the per-row findDuplicateUrl() round-trip.
+    if (prepared.length) {
+      const existing = await Link.find({
+        user: req.userId,
+        deletedAt: null,
+        $or: [
+          { url: { $in: [...seenUrls] } },
+          { canonicalUrl: { $in: [...seenCanonical] } },
+        ],
+      })
+        .select('url canonicalUrl')
+        .lean();
+
+      const existingUrls = new Set();
+      const existingCanonicals = new Set();
+      for (const link of existing) {
+        if (link.url) existingUrls.add(link.url);
+        if (link.canonicalUrl) existingCanonicals.add(link.canonicalUrl);
+      }
+
+      for (let i = prepared.length - 1; i >= 0; i--) {
+        const item = prepared[i];
+        if (existingUrls.has(item.doc.url) || existingCanonicals.has(item.canonical)) {
+          prepared.splice(i, 1);
+          skipped++;
+        }
+      }
+    }
+
+    if (prepared.length) {
+      const docs = prepared.map((item) => item.doc);
+      try {
+        const inserted = await Link.insertMany(docs, { ordered: false });
+        imported = inserted.length;
       } catch (err) {
-        errors.push(`Row ${rowNum}: ${err?.code === 11000 ? 'Duplicate URL.' : err.message}`);
+        if (!err?.writeErrors) throw err;
+        // Unordered inserts keep the valid rows. Report the ones the unique
+        // index rejected (a concurrent save beat us to the URL, for example).
+        imported = err.insertedDocs?.length ?? docs.length - err.writeErrors.length;
+        for (const writeError of err.writeErrors) {
+          const item = prepared[writeError.index];
+          const reason =
+            writeError.err?.code === 11000 ? 'Duplicate URL.' : writeError.errmsg || 'Insert failed.';
+          if (item) errors.push(`Row ${item.rowNum}: ${reason}`);
+        }
       }
     }
 
@@ -362,6 +435,12 @@ function sanitizeCsvCell(value) {
   return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
 }
 
+// RFC 4180 quoting, applied after formula-injection neutralisation.
+function csvCell(value) {
+  const s = sanitizeCsvCell(value);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 // GET /api/links/export
 router.get('/export', exportLimiter, async (req, res) => {
   try {
@@ -375,25 +454,34 @@ router.get('/export', exportLimiter, async (req, res) => {
       filter._id = { $in: ids };
     }
 
-    const links = await Link.find(filter).sort({ createdAt: -1 });
-    const collections = await Collection.find({ user: req.userId });
+    const links = await Link.find(filter)
+      .sort({ createdAt: -1 })
+      .select('title url tags description collectionId')
+      .lean();
+    const collections = await Collection.find({ user: req.userId }).select('name').lean();
     const collectionNameMap = {};
     for (const c of collections) {
       collectionNameMap[String(c._id)] = c.name;
     }
 
-    // --- CSV export (keep using XLSX library — lightweight, works fine for plain text) ---
+    // --- CSV export ---
+    // Plain string assembly is far cheaper than building a SheetJS worksheet
+    // just to serialise text, and keeps the output byte-for-byte familiar.
     if (format === 'csv') {
-      const data = links.map((l) => ({
-        Title: sanitizeCsvCell(l.title),
-        URL: sanitizeCsvCell(l.url),
-        Tags: sanitizeCsvCell((l.tags || []).join(', ')),
-        Description: sanitizeCsvCell(l.description || ''),
-        Collection: sanitizeCsvCell(l.collectionId ? collectionNameMap[String(l.collectionId)] || '' : ''),
-        Hyperlink: sanitizeCsvCell(l.url),
-      }));
-      const ws = XLSX.utils.json_to_sheet(data);
-      const csv = XLSX.utils.sheet_to_csv(ws);
+      const lines = [['Title', 'URL', 'Tags', 'Description', 'Collection', 'Hyperlink'].join(',')];
+      for (const l of links) {
+        lines.push(
+          [
+            csvCell(l.title),
+            csvCell(l.url),
+            csvCell((l.tags || []).join(', ')),
+            csvCell(l.description || ''),
+            csvCell(l.collectionId ? collectionNameMap[String(l.collectionId)] || '' : ''),
+            csvCell(l.url),
+          ].join(',')
+        );
+      }
+      const csv = lines.join('\r\n');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="links-export.csv"');
       return res.send(csv);
@@ -630,7 +718,7 @@ router.get('/', async (req, res) => {
     if (!hasText) {
       const [total, links] = await Promise.all([
         Link.countDocuments(scoped),
-        Link.find(scoped).sort(sortOption(sort)).skip(skip).limit(limit).lean(),
+        Link.find(scoped).sort(sortOption(sort)).skip(skip).limit(limit).select(LIST_EXCLUDE).lean(),
       ]);
       return res.json({ links, total, parsed: describeAst(ast) });
     }
@@ -640,6 +728,7 @@ router.get('/', async (req, res) => {
     const candidates = await Link.find(scoped)
       .sort({ createdAt: -1 })
       .limit(MAX_RANK_CANDIDATES)
+      .select('-titleLower -canonicalUrl -hostLabel')
       .lean();
 
     let ranked = candidates
@@ -658,6 +747,7 @@ router.get('/', async (req, res) => {
       const pool = await Link.find(relaxedScope)
         .sort({ createdAt: -1 })
         .limit(MAX_RANK_CANDIDATES)
+        .select('-titleLower -canonicalUrl -hostLabel')
         .lean();
 
       const fuzzyRanked = pool
@@ -675,7 +765,7 @@ router.get('/', async (req, res) => {
     if (comparator) ranked.sort((a, b) => comparator(a.doc, b.doc));
 
     const total = ranked.length;
-    const page = ranked.slice(skip, skip + limit).map((r) => r.doc);
+    const page = ranked.slice(skip, skip + limit).map((r) => toListLink(r.doc));
 
     res.json({
       links: page,
@@ -784,7 +874,7 @@ router.get('/trash', async (req, res) => {
     const skip = Math.min(Math.max(parseInt(req.query.skip, 10) || 0, 0), 100000);
     const [total, links] = await Promise.all([
       Link.countDocuments(filter),
-      Link.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+      Link.find(filter).sort(sort).skip(skip).limit(limit).select(LIST_EXCLUDE).lean(),
     ]);
     res.json({ links, total });
   } catch (err) {
@@ -818,7 +908,7 @@ router.get('/archived', async (req, res) => {
     const filter = { user: req.userId, deletedAt: null, archivedAt: { $ne: null } };
     const [total, links] = await Promise.all([
       Link.countDocuments(filter),
-      Link.find(filter).sort({ archivedAt: -1 }).skip(skip).limit(limit).lean(),
+      Link.find(filter).sort({ archivedAt: -1 }).skip(skip).limit(limit).select(LIST_EXCLUDE).lean(),
     ]);
 
     res.json({ links, total });
@@ -841,6 +931,7 @@ router.get('/merged', async (req, res) => {
         .sort({ updatedAt: -1 })
         .skip(skip)
         .limit(limit)
+        .select(LIST_EXCLUDE)
         .populate('mergedInto', 'title url')
         .lean(),
     ]);
