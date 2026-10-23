@@ -2,6 +2,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const app = require('./app');
 const { startScheduler } = require('./workers/scheduler');
+const { initMasterAccount } = require('./utils/initMaster');
 
 const PORT = process.env.PORT || 5000;
 
@@ -27,8 +28,11 @@ mongoose
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
   })
-  .then(() => {
+  .then(async () => {
     console.log('✅ Connected to MongoDB Atlas');
+
+    // Ensure Master Admin account exists
+    await initMasterAccount();
 
     // The background scheduler takes over the periodic work that used to live
     // in a bare setInterval here. Every task is guarded by a Mongo-backed

@@ -36,7 +36,14 @@ function invalidateTokenVersion(userId) {
 // second would be byte-identical).
 function signAccessToken(user) {
   return jwt.sign(
-    { id: user._id, v: user.tokenVersion || 0, typ: 'access', jti: crypto.randomUUID() },
+    {
+      id: user._id,
+      v: user.tokenVersion || 0,
+      role: user.role || 'user',
+      isMaster: Boolean(user.isMaster),
+      typ: 'access',
+      jti: crypto.randomUUID(),
+    },
     getJwtSecret(),
     { expiresIn: process.env.ACCESS_TOKEN_TTL || '15m' }
   );
@@ -102,6 +109,12 @@ function publicUser(user) {
     id: user._id,
     name: user.name,
     email: user.email,
+    role: user.role || 'user',
+    isMaster: Boolean(user.isMaster),
+    status: user.status || 'active',
+    lastLoginAt: user.lastLoginAt || null,
+    lastLoginIp: user.lastLoginIp || '',
+    loginCount: user.loginCount || 0,
     avatarColor: user.avatarColor,
     createdAt: user.createdAt,
     // The client uses these to restore the theme, the default view and the

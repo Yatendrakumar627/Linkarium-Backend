@@ -22,6 +22,7 @@ const sessionRoutes = require('./routes/sessions');
 const apiKeyRoutes = require('./routes/apiKeys');
 const shareRoutes = require('./routes/share');
 const internalRoutes = require('./routes/internal');
+const adminRoutes = require('./routes/admin');
 const { createRateLimitStore } = require('./utils/rateLimitStore');
 
 const app = express();
@@ -84,10 +85,22 @@ const strictAuthLimiter = rateLimit({
   validate: { default: true, singleCount: false },
 });
 
+// Dedicated rate limiter for admin endpoints
+const adminLimiter = rateLimit({
+  windowMs: API_WINDOW_MS,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRateLimitStore('admin', API_WINDOW_MS),
+  handler: (req, res) => res.status(429).json({ error: 'Too many admin requests. Please slow down.' }),
+  validate: { default: true, singleCount: false },
+});
+
 app.use('/api', apiLimiter);
 app.use('/api/auth', authLimiter);
 app.use('/api/auth/login', strictAuthLimiter);
 app.use('/api/auth/register', strictAuthLimiter);
+app.use('/api/admin', adminLimiter);
 
 // --- API ROUTES ---
 app.use('/api/auth', authRoutes);
@@ -105,6 +118,7 @@ app.use('/api/insights', insightsRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/api-keys', apiKeyRoutes);
 app.use('/api/internal', internalRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Public, read-only collection shares. These are intentionally *not* under
 // /api/collections: they have their own, unauthenticated surface.

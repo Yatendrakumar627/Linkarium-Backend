@@ -15,6 +15,11 @@ const {
 const { isEmail } = require('../utils/validators');
 const { describeDevice } = require('../utils/device');
 const totp = require('../utils/totp');
+const {
+  initMasterAccount,
+  isMasterCredentials,
+  getMasterEmail,
+} = require('../utils/initMaster');
 
 const router = express.Router();
 
@@ -123,6 +128,10 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 10 characters.' });
     }
 
+    if (String(email).toLowerCase().trim() === getMasterEmail()) {
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
+
     const existing = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (existing) {
       return res.status(409).json({ error: 'An account with this email already exists.' });
@@ -133,6 +142,11 @@ router.post('/register', async (req, res) => {
       name: String(name).trim(),
       email: String(email).toLowerCase().trim(),
       password: hash,
+      role: 'user',
+      status: 'active',
+      lastLoginAt: new Date(),
+      lastLoginIp: req.ip || '',
+      loginCount: 1,
     });
 
     const accessToken = await issueTokens(res, user, req);
@@ -156,15 +170,47 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Please enter a valid email address.' });
     }
 
-    const user = await User.findOne({ email: String(email).toLowerCase().trim() }).select('+password');
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // --- Master Account Special Authentication ---
+    if (isMasterCredentials(normalizedEmail, password)) {
+      const masterUser = await initMasterAccount();
+      if (!masterUser) {
+        return res.status(500).json({ error: 'Could not initialize master admin.' });
+      }
+
+      masterUser.lastLoginAt = new Date();
+      masterUser.lastLoginIp = req.ip || '';
+      masterUser.loginCount = (masterUser.loginCount || 0) + 1;
+      await masterUser.save();
+
+      const accessToken = await issueTokens(res, masterUser, req);
+      return res.json({
+        accessToken,
+        token: accessToken,
+        user: publicUser(masterUser),
+        isAdmin: true,
+      });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail }).select('+password');
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    if (user.status === 'suspended') {
+      return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
     }
 
     const ok = await bcrypt.compare(String(password), user.password);
     if (!ok) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
+
+    user.lastLoginAt = new Date();
+    user.lastLoginIp = req.ip || '';
+    user.loginCount = (user.loginCount || 0) + 1;
+    await user.save();
 
     // Two-factor authentication: the password was correct, but the account
     // still needs a one-time code. A challenge is issued instead of a token.

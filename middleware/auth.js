@@ -104,12 +104,18 @@ module.exports = async function auth(req, res, next) {
 
     let cached = getCachedTokenVersion(userId);
     if (cached === undefined || cached !== v) {
-      const user = await User.findById(userId).select('tokenVersion');
+      const user = await User.findById(userId).select('tokenVersion status role');
       if (!user) {
         return res.status(401).json({ error: 'Not authorized. Token invalid or expired.' });
       }
+      if (user.status === 'suspended') {
+        return res.status(403).json({ error: 'Your account has been suspended by an administrator.' });
+      }
       cached = user.tokenVersion || 0;
       setCachedTokenVersion(userId, cached);
+      req.userRole = user.role || 'user';
+    } else {
+      req.userRole = payload.role || 'user';
     }
 
     if (cached !== v) {
