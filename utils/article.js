@@ -11,25 +11,6 @@
 
 const { decodeEntities } = require('./og');
 
-// Elements whose *content* is never part of the article.
-const STRIPPED_ELEMENTS = [
-  'script',
-  'style',
-  'noscript',
-  'template',
-  'svg',
-  'math',
-  'iframe',
-  'object',
-  'embed',
-  'canvas',
-  'form',
-  'nav',
-  'aside',
-  'footer',
-  'header',
-];
-
 // Elements that introduce a line break.
 const BLOCK_ELEMENTS =
   'address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul';

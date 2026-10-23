@@ -114,7 +114,7 @@ const youtubeAdapter = {
     const host = urlObj.hostname.toLowerCase().replace(/^www\./, '');
     return host === 'youtube.com' || host === 'm.youtube.com' || host === 'youtu.be' || host === 'music.youtube.com';
   },
-  async getCandidates(url, urlObj) {
+  async getCandidates(url) {
     const candidates = [];
     try {
       const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
@@ -222,7 +222,7 @@ const spotifyAdapter = {
     const host = urlObj.hostname.toLowerCase().replace(/^www\./, '');
     return host === 'open.spotify.com' || host === 'spotify.com';
   },
-  async getCandidates(url, urlObj) {
+  async getCandidates(url) {
     const candidates = [];
     try {
       const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`;
@@ -328,12 +328,10 @@ const genericWebAdapter = {
     const brandKey = registrableLabel(host);
 
     // 1. Fetch live page HTML
-    let fetchSuccess = false;
     let ogData = null;
     try {
       const res = await safeFetch(url, { timeoutMs: 6000, maxBytes: 1024 * 512 });
       if (res.ok && res.text) {
-        fetchSuccess = true;
         const html = res.text;
         ogData = extractOpenGraph(html, res.finalUrl || url);
 
