@@ -11,7 +11,11 @@ function getMasterEmail() {
 }
 
 function getMasterPassword() {
-  return process.env.MASTER_ADMIN_PASSWORD || DEFAULT_MASTER_PASSWORD;
+  const pass = process.env.MASTER_ADMIN_PASSWORD || DEFAULT_MASTER_PASSWORD;
+  if (process.env.NODE_ENV === 'production' && (!process.env.MASTER_ADMIN_PASSWORD || pass === DEFAULT_MASTER_PASSWORD)) {
+    console.warn('⚠️ [SECURITY ALERT] Default MASTER_ADMIN_PASSWORD detected in production! Update MASTER_ADMIN_PASSWORD in .env immediately.');
+  }
+  return pass;
 }
 
 function getMasterName() {

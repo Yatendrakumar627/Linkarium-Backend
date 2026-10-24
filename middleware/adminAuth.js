@@ -14,6 +14,12 @@ module.exports = async function adminAuth(req, res, next) {
   res.setHeader('Surrogate-Control', 'no-store');
 
   try {
+    // API keys (lk_...) are scoped personal tokens for user scripts/extensions.
+    // They must NEVER be permitted to access administrative console endpoints.
+    if (req.apiKeyScopes) {
+      return res.status(403).json({ error: 'API keys cannot access administrative endpoints.' });
+    }
+
     if (!req.userId) {
       return res.status(401).json({ error: 'Not authorized.' });
     }

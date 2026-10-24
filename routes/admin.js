@@ -281,87 +281,6 @@ router.get('/overview', async (req, res) => {
 });
 
 // ============================================================================
-// 1.1 REAL-TIME ACTIVITY STREAM
-// ============================================================================
-router.get('/activity', async (req, res) => {
-  try {
-    const [recentUsers, recentLinks, recentSessions] = await Promise.all([
-      User.find({})
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .select('_id name email createdAt avatarColor status role isMaster')
-        .lean(),
-      Link.find({ deletedAt: null })
-        .sort({ createdAt: -1 })
-        .limit(12)
-        .populate('user', 'name email avatarColor')
-        .select('_id title url visits createdAt user color')
-        .lean(),
-      Session.find({ revokedAt: null })
-        .sort({ lastUsedAt: -1 })
-        .limit(10)
-        .populate('user', 'name email avatarColor')
-        .select('_id user device ip lastUsedAt createdAt')
-        .lean(),
-    ]);
-
-    const events = [];
-
-    (recentUsers || []).forEach((u) => {
-      events.push({
-        id: `user-${u._id}`,
-        type: 'user_registered',
-        category: 'user',
-        title: `${u.name} joined Linkarium`,
-        subtitle: u.email,
-        timestamp: u.createdAt,
-        color: '#3b82f6',
-        badge: u.isMaster ? '👑 Master' : u.role === 'admin' ? '🛡️ Admin' : '👤 User',
-      });
-    });
-
-    (recentLinks || []).forEach((l) => {
-      events.push({
-        id: `link-${l._id}`,
-        type: 'link_saved',
-        category: 'link',
-        title: l.title || l.url,
-        subtitle: l.url,
-        user: l.user ? { name: l.user.name, email: l.user.email, avatarColor: l.user.avatarColor } : null,
-        timestamp: l.createdAt,
-        color: l.color || '#10b981',
-        badge: `${l.visits || 0} clicks`,
-      });
-    });
-
-    (recentSessions || []).forEach((s) => {
-      events.push({
-        id: `session-${s._id}`,
-        type: 'session_active',
-        category: 'session',
-        title: `${s.user?.name || 'Active User'} session`,
-        subtitle: `${s.device?.browser || 'Browser'} on ${s.device?.os || 'OS'} • ${s.ip || 'Unknown IP'}`,
-        user: s.user ? { name: s.user.name, email: s.user.email, avatarColor: s.user.avatarColor } : null,
-        timestamp: s.lastUsedAt || s.createdAt,
-        color: '#06b6d4',
-        badge: '🟢 Online',
-      });
-    });
-
-    events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      events: events.slice(0, 25),
-    });
-  } catch (err) {
-    console.error('[admin/activity] error:', err);
-    res.status(500).json({ error: 'Failed to retrieve activity stream.' });
-  }
-});
-
-// ============================================================================
 // 2. USERS MANAGEMENT & DEEP TRACKING (LIST & SEARCH)
 // ============================================================================
 router.get('/users', async (req, res) => {
@@ -1344,6 +1263,10 @@ router.get('/database/collection/:name', async (req, res) => {
 // GET /api/admin/database/dump — Complete database dump (All collections & documents)
 router.get('/database/dump', async (req, res) => {
   try {
+    if (!isMasterUser(req.adminUser)) {
+      return res.status(403).json({ error: 'Full database dump is restricted strictly to the Master Administrator.' });
+    }
+
     const db = mongoose.connection.db;
     if (!db) {
       return res.status(503).json({ error: 'Database connection is not available.' });
