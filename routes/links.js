@@ -1,7 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
-const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const Link = require('../models/Link');
 const User = require('../models/User');
@@ -261,31 +260,69 @@ const MAX_IMPORT_ROWS = 5000;
 const VISIT_DEBOUNCE_MS = 60 * 1000;
 const visitDebounce = new Map();
 
-// --- IMPORT / EXPORT ---
+async function parseImportRows(buffer, originalname = '') {
+  const isCsv = String(originalname || '').toLowerCase().endsWith('.csv');
+  const wb = new ExcelJS.Workbook();
+  if (isCsv) {
+    const { Readable } = require('stream');
+    await wb.csv.read(Readable.from(buffer));
+  } else {
+    await wb.xlsx.load(buffer);
+  }
 
-function parseImportRows(buffer) {
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+  const ws = wb.worksheets[0];
+  if (!ws) return [];
 
-  return rows.map((r) => {
-    const title = String(r.Title || r.title || '').trim();
-    const url = String(r.URL || r.url || r.Hyperlink || r.hyperlink || '').trim();
-    const tagsRaw = String(r.Tags || r.tags || '');
-    const description = String(r.Description || r.description || '').trim();
-    const collection = String(r.Collection || r.collection || '').trim();
-    const hyperlink = String(r.Hyperlink || r.hyperlink || '').trim();
-    return { title, url: url || hyperlink, tagsRaw, description, collection };
+  const headers = [];
+  const rows = [];
+
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) {
+      row.eachCell((cell, colNumber) => {
+        headers[colNumber] = String(cell.value || '').trim().toLowerCase();
+      });
+      return;
+    }
+
+    const rowObj = {};
+    row.eachCell((cell, colNumber) => {
+      const header = headers[colNumber];
+      if (header) {
+        let val = cell.value;
+        if (val && typeof val === 'object') {
+          val = val.text || val.hyperlink || val.result || '';
+        }
+        rowObj[header] = String(val ?? '').trim();
+      }
+    });
+
+    const title = String(rowObj.title || '').trim();
+    const url = String(rowObj.url || rowObj.hyperlink || rowObj.link || '').trim();
+    const tagsRaw = String(rowObj.tags || '');
+    const description = String(rowObj.description || '').trim();
+    const collection = String(rowObj.collection || '').trim();
+
+    if (title || url) {
+      rows.push({ title, url, tagsRaw, description, collection });
+    }
   });
+
+  return rows;
 }
 
 // POST /api/links/import
-router.post('/import', importLimiter, upload.single('file'), async (req, res) => {
+router.post(
+  '/import',
+  importLimiter,
+  upload.single('file'),
+  upload.validateUploadSignature,
+  async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded.' });
   }
 
   try {
-    const rows = parseImportRows(req.file.buffer);
+    const rows = await parseImportRows(req.file.buffer, req.file.originalname);
     if (rows.length > MAX_IMPORT_ROWS) {
       return res.status(413).json({
         error: `File contains too many rows (max ${MAX_IMPORT_ROWS}).`,

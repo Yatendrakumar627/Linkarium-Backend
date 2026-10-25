@@ -47,6 +47,9 @@ function isMasterCredentials(email, password) {
  * Can be called safely on startup or on-demand.
  */
 async function initMasterAccount() {
+  if (process.env.DISABLE_MASTER_BOOTSTRAP === 'true') {
+    return null;
+  }
   try {
     const email = getMasterEmail();
     const rawPassword = getMasterPassword();

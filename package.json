@@ -24,8 +24,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.5",
     "multer": "^2.3.0",
-    "tldts": "^7.4.12",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+    "tldts": "^7.4.12"
   },
   "devDependencies": {
     "nodemon": "^3.1.14",
