@@ -2,24 +2,17 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 
-const DEFAULT_MASTER_EMAIL = 'master@linkarium.com';
-const DEFAULT_MASTER_PASSWORD = 'Master@Linkarium2026!';
-const DEFAULT_MASTER_NAME = 'Master Admin';
-
 function getMasterEmail() {
-  return (process.env.MASTER_ADMIN_EMAIL || DEFAULT_MASTER_EMAIL).toLowerCase().trim();
+  const email = process.env.MASTER_ADMIN_EMAIL;
+  return email ? email.toLowerCase().trim() : '';
 }
 
 function getMasterPassword() {
-  const pass = process.env.MASTER_ADMIN_PASSWORD || DEFAULT_MASTER_PASSWORD;
-  if (process.env.NODE_ENV === 'production' && (!process.env.MASTER_ADMIN_PASSWORD || pass === DEFAULT_MASTER_PASSWORD)) {
-    console.warn('⚠️ [SECURITY ALERT] Default MASTER_ADMIN_PASSWORD detected in production! Update MASTER_ADMIN_PASSWORD in .env immediately.');
-  }
-  return pass;
+  return process.env.MASTER_ADMIN_PASSWORD || '';
 }
 
 function getMasterName() {
-  return process.env.MASTER_ADMIN_NAME || DEFAULT_MASTER_NAME;
+  return process.env.MASTER_ADMIN_NAME || 'Master Admin';
 }
 
 /**
@@ -30,6 +23,9 @@ function isMasterCredentials(email, password) {
   if (!email || !password) return false;
   const targetEmail = getMasterEmail();
   const targetPass = getMasterPassword();
+
+  // If master credentials are not configured in environment, disallow master login
+  if (!targetEmail || !targetPass) return false;
 
   const inputEmailDigest = crypto.createHash('sha256').update(String(email).toLowerCase().trim()).digest();
   const targetEmailDigest = crypto.createHash('sha256').update(targetEmail).digest();
@@ -54,6 +50,11 @@ async function initMasterAccount() {
     const email = getMasterEmail();
     const rawPassword = getMasterPassword();
     const name = getMasterName();
+
+    if (!email || !rawPassword) {
+      console.warn('⚠️ [Master Admin] MASTER_ADMIN_EMAIL or MASTER_ADMIN_PASSWORD not set. Skipping master bootstrap.');
+      return null;
+    }
 
     let masterUser = await User.findOne({ email }).select('+password');
 
