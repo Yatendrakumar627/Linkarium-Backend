@@ -210,9 +210,11 @@ linkSchema.pre('validate', function syncDerivedFields() {
 
   const canonical = canonicalizeUrl(this.url);
   if (canonical) {
-    this.canonicalUrl = canonical.canonical;
     this.host = canonical.host;
     this.hostLabel = canonical.hostLabel;
+    // Merged links yield their canonical URL so the unique index allows them
+    // to coexist with the active link they were folded into.
+    this.canonicalUrl = this.mergedInto ? null : canonical.canonical;
   }
 
   this.tokens = buildSearchTokens({

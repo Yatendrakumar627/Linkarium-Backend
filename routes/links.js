@@ -990,7 +990,7 @@ router.get('/duplicates', async (req, res) => {
   try {
     const limit = parseLimit(req.query.limit, { def: 25, min: 1, max: 100 });
     const userObjectId = new mongoose.Types.ObjectId(req.userId);
-    const match = { user: userObjectId, deletedAt: null, archivedAt: null };
+    const match = { user: userObjectId, deletedAt: null, archivedAt: null, mergedInto: null };
 
     const [sameUrl, sameTitle] = await Promise.all([
       Link.aggregate([
@@ -1019,7 +1019,13 @@ router.get('/duplicates', async (req, res) => {
         { $project: { _id: 0, reason: 'same-url', key: '$_id', count: 1, links: 1 } },
       ]),
       Link.aggregate([
-        { $match: match },
+        {
+          $match: {
+            ...match,
+            host: { $exists: true, $nin: ['', null] },
+            titleLower: { $exists: true, $nin: ['', null] },
+          },
+        },
         {
           $group: {
             _id: { host: '$host', title: '$titleLower' },
@@ -1041,11 +1047,30 @@ router.get('/duplicates', async (req, res) => {
         { $match: { count: { $gt: 1 } } },
         { $sort: { count: -1 } },
         { $limit: limit },
-        { $project: { _id: 0, reason: 'same-title', key: '$_id', count: 1, links: 1 } },
+        {
+          $project: {
+            _id: 0,
+            reason: 'same-title',
+            key: { $concat: [{ $ifNull: ['$_id.host', ''] }, '::', { $ifNull: ['$_id.title', ''] }] },
+            count: 1,
+            links: 1,
+          },
+        },
       ]),
     ]);
 
-    res.json({ groups: [...sameUrl, ...sameTitle] });
+    // Exclude pairs that are already captured by sameUrl from sameTitle
+    const seenPairs = new Set();
+    for (const g of sameUrl) {
+      const ids = (g.links || []).map((l) => String(l._id)).sort().join(':');
+      seenPairs.add(ids);
+    }
+    const filteredSameTitle = sameTitle.filter((g) => {
+      const ids = (g.links || []).map((l) => String(l._id)).sort().join(':');
+      return !seenPairs.has(ids);
+    });
+
+    res.json({ groups: [...sameUrl, ...filteredSameTitle] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to find duplicates.' });
@@ -1163,25 +1188,47 @@ async function mergeLinkDocs(userId, sourceId, targetId) {
     throw err;
   }
 
-  // Fold the source into the target.
-  const mergedTags = Array.from(new Set([...(target.tags || []), ...(source.tags || [])]));
-  target.tags = mergedTags;
-  if (!target.description && source.description) target.description = source.description;
-  if (!target.note && source.note) target.note = source.note;
-  target.visits = (target.visits || 0) + (source.visits || 0);
-  if (source.favorite) target.favorite = true;
-
-  // The canonical URL is unique across live links. If the target never got
-  // one (a link saved before the canonical engine existed) it can inherit
-  // the source's — but only after the source gives it up, otherwise the
-  // unique index rejects the save.
-  if (!target.canonicalUrl && source.canonicalUrl) {
-    target.canonicalUrl = source.canonicalUrl;
-    source.canonicalUrl = null;
+  if (target.mergedInto) {
+    const err = new Error('Cannot merge into a link that is already merged into another.');
+    err.status = 400;
+    throw err;
   }
 
+  // Fold the source tags into the target (case-insensitive deduplication).
+  const tagMap = new Map();
+  for (const t of [...(target.tags || []), ...(source.tags || [])]) {
+    const clean = String(t || '').trim();
+    if (clean && !tagMap.has(clean.toLowerCase())) {
+      tagMap.set(clean.toLowerCase(), clean);
+    }
+  }
+  target.tags = Array.from(tagMap.values());
+
+  // Fold description, note, visits, favorite, collectionId, lastVisitedAt
+  if (!target.description && source.description) target.description = source.description;
+  if (!target.note && source.note) {
+    target.note = source.note;
+  } else if (source.note && target.note && target.note !== source.note) {
+    target.note = `${target.note}\n\n[Merged note]:\n${source.note}`.slice(0, 5000);
+  }
+  target.visits = (target.visits || 0) + (source.visits || 0);
+  if (source.favorite) target.favorite = true;
+  if (!target.collectionId && source.collectionId) target.collectionId = source.collectionId;
+  if (source.lastVisitedAt && (!target.lastVisitedAt || source.lastVisitedAt > target.lastVisitedAt)) {
+    target.lastVisitedAt = source.lastVisitedAt;
+  }
+
+  // The canonical URL is unique across live links. If the target never got
+  // one it can inherit the source's.
+  if (!target.canonicalUrl && source.canonicalUrl) {
+    target.canonicalUrl = source.canonicalUrl;
+  }
+
+  // Source yields its canonical URL so it never collides with target's unique index.
+  source.canonicalUrl = null;
   source.mergedInto = target._id;
   source.archivedAt = new Date();
+
   await source.save();
   await target.save();
 
