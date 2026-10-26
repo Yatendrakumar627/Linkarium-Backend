@@ -15,6 +15,8 @@ router.use(auth);
 const THEMES = ['dark', 'light', 'system'];
 // The views the client can open.
 const DEFAULT_VIEWS = ['dashboard', 'links', 'collections', 'tags', 'archive', 'favorites', 'insights'];
+// The color classification modes supported for cards and tags.
+const COLOR_MODES = ['tag', 'collection', 'blend', 'brand', 'own', 'tag-first', 'collection-first'];
 
 // GET /api/user/me
 router.get('/me', async (req, res) => {
@@ -86,6 +88,7 @@ router.patch('/preferences', async (req, res) => {
       theme,
       defaultView,
       autoEnrich,
+      colorMode,
     } = req.body || {};
 
     if (!user.preferences) {
@@ -132,6 +135,12 @@ router.patch('/preferences', async (req, res) => {
     }
     if (autoEnrich !== undefined) {
       user.preferences.autoEnrich = Boolean(autoEnrich);
+    }
+    if (colorMode !== undefined) {
+      if (!COLOR_MODES.includes(colorMode)) {
+        return res.status(400).json({ error: `The color mode must be one of: ${COLOR_MODES.join(', ')}.` });
+      }
+      user.preferences.colorMode = colorMode;
     }
 
     await user.save();

@@ -87,6 +87,23 @@ const userSchema = new mongoose.Schema(
       // When the last digest email was sent. Used to avoid sending twice when
       // a scheduler run is delayed past the target hour.
       lastDigestAt: { type: Date, default: null },
+      // Color classification modes:
+      // - 'tag' (tag-wise): all cards sharing a tag have same color (and active tag view)
+      // - 'collection' (collection-wise): all cards in collection have same collection color
+      // - 'blend' (harmonic blend): shortest-arc HSL blend between collection, tag & link
+      // - 'brand' (brand-wise): authentic brand & domain intelligence (YouTube, GitHub, Netlify, etc.)
+      // - 'own' (independent): individually assigned link color
+      colorMode: {
+        type: String,
+        enum: ['tag', 'collection', 'blend', 'brand', 'own', 'tag-first', 'collection-first'],
+        default: 'collection',
+      },
+      // User-configured custom tag colors { [tagName]: '#hexColor' }
+      tagColors: {
+        type: Map,
+        of: String,
+        default: () => new Map(),
+      },
     },
   },
   {

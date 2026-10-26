@@ -127,6 +127,10 @@ function publicUser(user) {
       theme: prefs.theme || 'dark',
       defaultView: prefs.defaultView || 'dashboard',
       autoEnrich: prefs.autoEnrich !== false,
+      colorMode: prefs.colorMode || 'collection',
+      tagColors: prefs.tagColors
+        ? (prefs.tagColors instanceof Map ? Object.fromEntries(prefs.tagColors) : typeof prefs.tagColors === 'object' ? prefs.tagColors : {})
+        : {},
     },
     twoFactorEnabled: Boolean(user.totp?.enabled),
     recoveryCodesLeft: Array.isArray(user.recoveryCodes) ? user.recoveryCodes.length : 0,
