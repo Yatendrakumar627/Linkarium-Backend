@@ -199,17 +199,50 @@ async function ownsCollection(collectionId, userId) {
 // "https://x.com/" and "https://x.com/?utm_source=twitter" all resolve to the
 // same link. The raw URL is compared as well so links written before the
 // canonical engine existed are still caught.
-async function findDuplicateUrl(userId, url, excludeId = null) {
+// Scans across the entire user library: active, archived, and trash.
+async function findDuplicateUrl(userId, url, options = {}) {
+  if (!url || typeof url !== 'string') return null;
+
+  const excludeId =
+    options && typeof options === 'object' && !options._bsontype && !options._id
+      ? options.excludeId
+      : (options || null);
+  const includeTrash =
+    options && typeof options === 'object' && 'includeTrash' in options
+      ? Boolean(options.includeTrash)
+      : true;
+
   const canonical = canonicalizeUrl(url);
   const or = [];
-  if (canonical) or.push({ canonicalUrl: canonical.canonical });
+  if (canonical?.canonical) or.push({ canonicalUrl: canonical.canonical });
   or.push({ url });
 
-  const q = { user: userId, deletedAt: null, $or: or };
-  if (excludeId) q._id = { $ne: excludeId };
-  return Link.findOne(q).select(
-    '_id title url description note tags collectionId favorite visits createdAt canonicalUrl'
-  );
+  const selectFields =
+    '_id title url description note tags collectionId favorite visits createdAt canonicalUrl archivedAt deletedAt color';
+
+  // 1. Check active & archived links first (deletedAt: null)
+  const activeQuery = { user: userId, deletedAt: null, $or: or };
+  if (excludeId) activeQuery._id = { $ne: excludeId };
+
+  const activeDoc = await Link.findOne(activeQuery).select(selectFields).lean();
+  if (activeDoc) {
+    activeDoc.location = activeDoc.archivedAt ? 'archived' : 'active';
+    return activeDoc;
+  }
+
+  // 2. Check trash if includeTrash is true
+  if (includeTrash) {
+    const trashQuery = { user: userId, deletedAt: { $ne: null }, $or: or };
+    if (excludeId) trashQuery._id = { $ne: excludeId };
+
+    const trashDoc = await Link.findOne(trashQuery).select(selectFields).lean();
+    if (trashDoc) {
+      trashDoc.location = 'trash';
+      return trashDoc;
+    }
+  }
+
+  return null;
 }
 
 // Per-user throttle on the visit endpoint so a single account cannot hammer the
@@ -853,10 +886,19 @@ router.post('/', async (req, res) => {
     if (!isHttpUrl(url)) {
       return res.status(400).json({ error: 'Only http(s) URLs can be saved.' });
     }
-    const existing = await findDuplicateUrl(req.userId, url);
+    const existing = await findDuplicateUrl(req.userId, url, { includeTrash: true });
     if (existing) {
+      if (req.body.replace) {
+        return await handleReplaceLink(existing._id, req.userId, req.body, res);
+      }
+      const locationLabel =
+        existing.location === 'trash'
+          ? 'in Trash'
+          : existing.location === 'archived'
+            ? 'in Archive'
+            : 'in your Library';
       return res.status(409).json({
-        error: 'A link with this URL already exists.',
+        error: `A link with this URL already exists ${locationLabel}.`,
         existing: {
           _id: existing._id,
           title: existing.title,
@@ -869,6 +911,10 @@ router.post('/', async (req, res) => {
           visits: existing.visits,
           createdAt: existing.createdAt,
           canonicalUrl: existing.canonicalUrl,
+          archivedAt: existing.archivedAt,
+          deletedAt: existing.deletedAt,
+          color: existing.color,
+          location: existing.location,
         },
       });
     }
@@ -904,6 +950,136 @@ router.post('/', async (req, res) => {
     }
     console.error(err);
     res.status(500).json({ error: 'Failed to create link.' });
+  }
+});
+
+// Atomically replaces an existing link document (whether active, archived, or in trash)
+// with the user's updated bookmark data. Restores it to the active library.
+async function handleReplaceLink(targetId, userId, body, res) {
+  if (!isObjectId(targetId)) return res.status(400).json({ error: 'Invalid link id.' });
+
+  const link = await Link.findOne({ _id: targetId, user: userId });
+  if (!link) return res.status(404).json({ error: 'Link not found.' });
+
+  let { title, url, description, note, collectionId, tags, favorite, color } = body;
+  if (!title || !url) {
+    return res.status(400).json({ error: 'Title and URL are required.' });
+  }
+
+  if (collectionId !== undefined && collectionId) {
+    if (!(await ownsCollection(collectionId, userId))) {
+      return res.status(400).json({ error: 'Invalid collection.' });
+    }
+  }
+  if (color !== undefined && color !== null && !isHexColor(color)) {
+    return res.status(400).json({ error: 'Invalid color format.' });
+  }
+
+  const newUrl = normalizeUrl(url);
+  if (!isHttpUrl(newUrl)) {
+    return res.status(400).json({ error: 'Only http(s) URLs can be saved.' });
+  }
+
+  // Ensure this replace does not collide with a different link in user's library
+  const otherDuplicate = await findDuplicateUrl(userId, newUrl, { excludeId: link._id, includeTrash: true });
+  if (otherDuplicate) {
+    return res.status(409).json({
+      error: 'Another link in your universe already uses this URL.',
+      existing: otherDuplicate,
+    });
+  }
+
+  const urlChanged = newUrl !== link.url;
+
+  // Restore and unarchive: bookmark becomes active in the universe
+  link.deletedAt = null;
+  link.archivedAt = null;
+  link.mergedInto = null;
+
+  link.title = String(title).trim();
+  link.url = newUrl;
+  link.description = typeof description === 'string' ? description.trim() : '';
+  link.note = typeof note === 'string' ? note.trim() : '';
+  link.tags = normalizeTags(tags);
+  link.collectionId = collectionId || null;
+  link.favorite = Boolean(favorite);
+  if (color) link.color = color;
+
+  if (urlChanged) {
+    link.og = {
+      title: '',
+      description: '',
+      image: '',
+      favicon: '',
+      siteName: '',
+      type: '',
+      fetchedAt: null,
+      error: '',
+    };
+    link.article = { text: '', wordCount: 0, extractedAt: null };
+    link.articleTokens = [];
+    link.health = {
+      status: 'unknown',
+      httpStatus: null,
+      error: null,
+      errorKind: null,
+      checkedAt: null,
+      lastOkAt: null,
+      nextCheckAt: null,
+      failures: 0,
+      latencyMs: null,
+      finalUrl: null,
+    };
+  }
+
+  await link.save();
+
+  try {
+    await applyRulesToLink(link, userId);
+  } catch (ruleErr) {
+    console.error('[rules] could not be applied:', ruleErr.message);
+  }
+
+  if (urlChanged) {
+    enrichLinkInBackground(link);
+  }
+
+  return res.json(link);
+}
+
+// GET /api/links/check-duplicate — real-time pre-save check across all links (active, archived, trash)
+router.get('/check-duplicate', async (req, res) => {
+  try {
+    const rawUrl = req.query.url;
+    if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+      return res.json({ duplicate: false, existing: null });
+    }
+    const clean = normalizeUrl(rawUrl.trim());
+    if (!isHttpUrl(clean)) {
+      return res.json({ duplicate: false, existing: null });
+    }
+    const excludeId = isObjectId(req.query.excludeId) ? req.query.excludeId : null;
+    const existing = await findDuplicateUrl(req.userId, clean, { excludeId, includeTrash: true });
+    res.json({
+      duplicate: Boolean(existing),
+      existing: existing || null,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to check duplicate.' });
+  }
+});
+
+// POST /api/links/:id/replace — replace an existing link with new bookmark data
+router.post('/:id/replace', async (req, res) => {
+  try {
+    await handleReplaceLink(req.params.id, req.userId, req.body, res);
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ error: 'A link with this URL already exists.' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Failed to replace link.' });
   }
 });
 
@@ -1681,5 +1857,8 @@ router.post('/:id/visit', visitLimiter, async (req, res) => {
     res.status(500).json({ error: 'Failed to record visit.' });
   }
 });
+
+router._findDuplicateUrl = findDuplicateUrl;
+router._handleReplaceLink = handleReplaceLink;
 
 module.exports = router;
