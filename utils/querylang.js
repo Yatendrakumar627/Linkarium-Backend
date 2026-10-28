@@ -28,6 +28,7 @@
 
 const { tokenize, escapeRegex } = require('./text');
 const { tokenFuzzyMatch } = require('./fuzzy');
+const { canonicalizeUrl } = require('./canonical');
 
 const OPERATOR_KEYS = new Set(['tag', 'domain', 'collection', 'is', 'visits', 'after', 'before']);
 
@@ -201,6 +202,8 @@ function emptyAst() {
     before: null,
     operators: [],
     unknown: [],
+    rawUrl: null,
+    canonicalUrl: null,
   };
 }
 
@@ -211,10 +214,27 @@ function emptyAst() {
  */
 function parseQuery(input) {
   const ast = emptyAst();
-  const tokens = splitTokens(input);
+  const source = String(input || '').trim();
 
-  for (const token of tokens) {
-    const { value, quoted, raw } = token;
+  // If input is a URL or domain with path, capture it directly for URL lookup
+  if (/^https?:\/\//i.test(source) || /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/i.test(source)) {
+    ast.rawUrl = source;
+    const c = canonicalizeUrl(source);
+    if (c) ast.canonicalUrl = c.canonical;
+  }
+
+  const tokens = splitTokens(source);
+
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const token = tokens[idx];
+    let { value, quoted, raw } = token;
+
+    // Check if current token is '-' and followed by a token (e.g. "- link", "- term")
+    if (value === '-' && idx + 1 < tokens.length && !tokens[idx + 1].quoted) {
+      idx++;
+      value = '-' + tokens[idx].value;
+      raw = raw + tokens[idx].raw;
+    }
 
     if (quoted) {
       ast.phrases.push(value.toLowerCase());
@@ -240,7 +260,11 @@ function parseQuery(input) {
       if (!OPERATOR_KEYS.has(key)) {
         // Unknown "key:value" — treat the whole thing as free text so that
         // searching for a URL or "time:12" still works.
-        for (const word of tokenize(value)) ast.terms.push(word);
+        let words = tokenize(value);
+        if (!words.length) words = tokenize(value, { stopwords: false, minLength: 1 });
+        for (const word of words) {
+          if (!ast.terms.includes(word)) ast.terms.push(word);
+        }
         ast.unknown.push(key);
         continue;
       }
@@ -318,9 +342,16 @@ function parseQuery(input) {
     }
 
     // Plain free text.
-    for (const word of tokenize(value)) {
-      ast.terms.push(word);
-      ast.operators.push({ key: 'term', value: word, raw, label: word });
+    let words = tokenize(value);
+    if (!words.length) {
+      // If stopword / minLength stripped all words, fallback to keeping the user's explicit query term
+      words = tokenize(value, { stopwords: false, minLength: 1 });
+    }
+    for (const word of words) {
+      if (!ast.terms.includes(word)) {
+        ast.terms.push(word);
+        ast.operators.push({ key: 'term', value: word, raw, label: word });
+      }
     }
   }
 
@@ -333,6 +364,13 @@ function parseQuery(input) {
  */
 function tokenPrefixFilter(term) {
   const re = `^${escapeRegex(term)}`;
+  if (term.length <= 2) {
+    // For very short terms (<= 2 chars), match prefix in metadata tokens,
+    // but require exact token match in article body to avoid pulling in every web article
+    return {
+      $or: [{ tokens: { $regex: re } }, { articleTokens: term }],
+    };
+  }
   return {
     $or: [{ tokens: { $regex: re } }, { articleTokens: { $regex: re } }],
   };
@@ -402,9 +440,27 @@ function compileAst(ast, base = {}, options = {}) {
   // A term may match either the metadata tokens (title, tags, description,
   // note, url) or the tokens extracted from the article body, so the same
   // query works before and after a page has been enriched.
-  for (const term of ast.terms) {
-    if (skipText) break;
-    and.push(tokenPrefixFilter(term));
+  if (!skipText && (ast.canonicalUrl || ast.rawUrl)) {
+    const urlConditions = [];
+    if (ast.canonicalUrl) urlConditions.push({ canonicalUrl: ast.canonicalUrl });
+    if (ast.rawUrl) urlConditions.push({ url: { $regex: escapeRegex(ast.rawUrl), $options: 'i' } });
+
+    const termFilters = ast.terms.map((t) => tokenPrefixFilter(t));
+    if (termFilters.length) {
+      and.push({
+        $or: [
+          ...urlConditions,
+          { $and: termFilters },
+        ],
+      });
+    } else if (urlConditions.length) {
+      and.push({ $or: urlConditions });
+    }
+  } else {
+    for (const term of ast.terms) {
+      if (skipText) break;
+      and.push(tokenPrefixFilter(term));
+    }
   }
   // Phrases: every word must be present (exact adjacency is verified later,
   // on the small candidate set, because Mongo cannot match it directly).
@@ -429,7 +485,7 @@ function compileAst(ast, base = {}, options = {}) {
 
   return {
     filter,
-    hasText: ast.terms.length > 0 || ast.phrases.length > 0,
+    hasText: ast.terms.length > 0 || ast.phrases.length > 0 || !!ast.rawUrl,
     terms: ast.terms,
     phrases: ast.phrases,
   };
@@ -448,11 +504,33 @@ function scoreLink(doc, ast, now = Date.now()) {
 
   let score = 0;
 
+  // Exact URL or canonicalUrl match gives massive boost
+  if (ast.canonicalUrl && (doc.canonicalUrl === ast.canonicalUrl || canonicalizeUrl(doc.url)?.canonical === ast.canonicalUrl)) {
+    score += 100;
+  } else if (ast.rawUrl && (doc.url === ast.rawUrl || url.includes(ast.rawUrl.toLowerCase()))) {
+    score += 80;
+  }
+
   for (const term of ast.terms) {
-    if (title.includes(term)) score += 10;
-    if (tags.some((t) => t.includes(term))) score += 8;
-    if (url.includes(term)) score += 5;
-    if (description.includes(term)) score += 3;
+    if (term.length <= 3) {
+      const boundaryRe = new RegExp(`\\b${escapeRegex(term)}\\b`, 'i');
+      if (boundaryRe.test(title)) score += 15;
+      else if (title.includes(term)) score += 2;
+
+      if (tags.some((t) => t === term)) score += 12;
+      else if (tags.some((t) => t.includes(term))) score += 2;
+
+      if (boundaryRe.test(url)) score += 8;
+      else if (url.includes(term)) score += 2;
+
+      if (boundaryRe.test(description)) score += 4;
+      else if (description.includes(term)) score += 1;
+    } else {
+      if (title.includes(term)) score += 10;
+      if (tags.some((t) => t.includes(term))) score += 8;
+      if (url.includes(term)) score += 5;
+      if (description.includes(term)) score += 3;
+    }
   }
 
   for (const phrase of ast.phrases) {
@@ -666,16 +744,24 @@ function matchesQuery(doc, ast, ctx = {}) {
     if (created > ast.before.getTime()) return false;
   }
 
-  // Free text: every term must match a token prefix (or, when fuzzy search is
-  // enabled, a token within the edit distance).
   const docTokens = Array.isArray(doc.tokens) ? doc.tokens : [];
   const articleTokens = Array.isArray(doc.articleTokens) ? doc.articleTokens : [];
-  for (const term of ast.terms) {
-    const hit =
-      docTokens.some((t) => String(t).startsWith(term)) ||
-      articleTokens.some((t) => String(t).startsWith(term)) ||
-      (fuzzy && tokenFuzzyMatch(term, docTokens));
-    if (!hit) return false;
+
+  // Free text: every term must match a token prefix (or, when fuzzy search is
+  // enabled, a token within the edit distance).
+  // If the query is an exact URL, check the URL directly as well
+  if (ast.canonicalUrl && (doc.canonicalUrl === ast.canonicalUrl || canonicalizeUrl(doc.url)?.canonical === ast.canonicalUrl)) {
+    // matched canonical URL directly
+  } else if (ast.rawUrl && doc.url && doc.url.toLowerCase().includes(ast.rawUrl.toLowerCase())) {
+    // matched raw URL directly
+  } else {
+    for (const term of ast.terms) {
+      const hit =
+        docTokens.some((t) => String(t).startsWith(term)) ||
+        articleTokens.some((t) => String(t).startsWith(term)) ||
+        (fuzzy && tokenFuzzyMatch(term, docTokens));
+      if (!hit) return false;
+    }
   }
 
   // Phrases.

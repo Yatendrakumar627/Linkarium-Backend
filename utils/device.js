@@ -5,22 +5,22 @@
 
 const BROWSERS = [
   { name: 'Edge', test: /Edg\//i },
+  { name: 'Opera', test: /OPR\//i },
+  { name: 'Brave', test: /Brave\//i },
   { name: 'Chrome', test: /Chrome\//i },
   { name: 'Firefox', test: /Firefox\//i },
   { name: 'Safari', test: /Safari\//i },
-  { name: 'Opera', test: /OPR\//i },
-  { name: 'Brave', test: /Brave\//i },
   { name: 'curl', test: /curl\//i },
   { name: 'Postman', test: /PostmanRuntime\//i },
   { name: 'Node', test: /node/i },
 ];
 
 const PLATFORMS = [
+  { name: 'iOS', test: /iPhone|iPad|iPod/i },
+  { name: 'Android', test: /Android/i },
   { name: 'Windows', test: /Windows/i },
   { name: 'macOS', test: /Mac OS X|Macintosh/i },
   { name: 'Linux', test: /Linux/i },
-  { name: 'Android', test: /Android/i },
-  { name: 'iOS', test: /iPhone|iPad|iPod/i },
 ];
 
 /**

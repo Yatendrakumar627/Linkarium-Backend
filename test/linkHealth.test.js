@@ -39,6 +39,12 @@ describe('classify', () => {
     assert.strictEqual(classify({ ok: false, status: 429 }).status, 'healthy');
   });
 
+  test('a 999 (LinkedIn bot challenge) is treated as restricted healthy, not broken', () => {
+    const verdict = classify({ ok: false, status: 999 });
+    assert.strictEqual(verdict.status, 'healthy');
+    assert.strictEqual(verdict.errorKind, 'restricted');
+  });
+
   test('a blocked URL is unknown, not broken', () => {
     const verdict = classify({ ok: false, status: null, errorKind: 'blocked-ip', error: 'blocked' });
     assert.strictEqual(verdict.status, 'unknown');

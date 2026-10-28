@@ -23,14 +23,17 @@ function safeEqual(a, b) {
 }
 
 /**
- * The secret may arrive as a Bearer token, an `x-cron-secret` header or a
- * `?secret=` query parameter (some cron services can only do GET).
+ * The secret may arrive as a Bearer token or an `x-cron-secret` header.
+ * Passing secrets in the query string is deprecated as query params leak into proxy & web logs.
  */
 function extractSecret(req) {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ')) return header.slice(7).trim();
   if (req.headers['x-cron-secret']) return String(req.headers['x-cron-secret']);
-  if (req.query && req.query.secret) return String(req.query.secret);
+  if (req.query && req.query.secret) {
+    console.warn('[Security Warning] Cron secret passed in URL query parameter. Use Authorization header or x-cron-secret instead to prevent log leakage.');
+    return String(req.query.secret);
+  }
   return '';
 }
 

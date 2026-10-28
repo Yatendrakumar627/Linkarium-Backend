@@ -27,8 +27,11 @@ const UNKNOWN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 // Never back off further than this.
 const MAX_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** HTTP statuses that mean "the link exists" even though the fetch failed. */
-const RESTRICTED_STATUSES = new Set([401, 403, 405, 429]);
+/** HTTP statuses that mean "the link exists" even though the fetch failed.
+ * 401/403/405/429: standard HTTP auth, method, or rate-limiting guards.
+ * 999: LinkedIn's well-known bot detection response code (link exists, request throttled).
+ */
+const RESTRICTED_STATUSES = new Set([401, 403, 405, 429, 999]);
 
 /** HTTP statuses that mean "the page is gone". */
 const GONE_STATUSES = new Set([404, 410]);

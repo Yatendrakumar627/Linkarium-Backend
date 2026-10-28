@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Link = require('../models/Link');
 const Collection = require('../models/Collection');
 const auth = require('../middleware/auth');
@@ -50,7 +51,7 @@ router.get('/suggest', async (req, res) => {
     const tagRx = new RegExp(`^${escapeRegex(term)}`, 'i');
     promises.push(
       Link.aggregate([
-        { $match: { user: req.userId, deletedAt: null } },
+        { $match: { user: new mongoose.Types.ObjectId(req.userId), deletedAt: null } },
         { $unwind: '$tags' },
         { $match: { tags: tagRx } },
         { $group: { _id: '$tags', count: { $sum: 1 } } },

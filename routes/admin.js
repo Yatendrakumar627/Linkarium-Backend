@@ -1093,18 +1093,24 @@ router.get('/export', async (req, res) => {
 
     // Format: CSV
     if (format === 'csv') {
+      const sanitizeCsvField = (val) => {
+        const s = String(val ?? '');
+        const neutralized = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+        return `"${neutralized.replace(/"/g, '""')}"`;
+      };
+
       const csvHeaders = ['ID,Name,Email,Role,Status,2FA Enabled,Login Count,Last Login IP,Last Login Date,Created Date'];
       const csvRows = users.map((u) => [
-        `"${u._id}"`,
-        `"${(u.name || '').replace(/"/g, '""')}"`,
-        `"${(u.email || '').replace(/"/g, '""')}"`,
-        `"${u.role || 'user'}"`,
-        `"${u.status || 'active'}"`,
-        `"${u.totp?.enabled ? 'YES' : 'NO'}"`,
-        u.loginCount || 0,
-        `"${u.lastLoginIp || ''}"`,
-        `"${u.lastLoginAt ? new Date(u.lastLoginAt).toISOString() : ''}"`,
-        `"${u.createdAt ? new Date(u.createdAt).toISOString() : ''}"`,
+        sanitizeCsvField(u._id),
+        sanitizeCsvField(u.name),
+        sanitizeCsvField(u.email),
+        sanitizeCsvField(u.role || 'user'),
+        sanitizeCsvField(u.status || 'active'),
+        sanitizeCsvField(u.totp?.enabled ? 'YES' : 'NO'),
+        Number(u.loginCount) || 0,
+        sanitizeCsvField(u.lastLoginIp || ''),
+        sanitizeCsvField(u.lastLoginAt ? new Date(u.lastLoginAt).toISOString() : ''),
+        sanitizeCsvField(u.createdAt ? new Date(u.createdAt).toISOString() : ''),
       ].join(','));
 
       const csvContent = [csvHeaders, ...csvRows].join('\r\n');

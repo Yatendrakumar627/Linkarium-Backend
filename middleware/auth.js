@@ -76,10 +76,36 @@ module.exports = async function auth(req, res, next) {
 
   // --- Personal access key ---
   if (token.startsWith('lk_')) {
+    // API keys are strictly intended for extension and automation bookmark workflows.
+    // They are prohibited from accessing user account settings, session lifecycle,
+    // API key generation, and administrative surfaces.
+    const reqPath = req.baseUrl || req.path || '';
+    const ALLOWED_API_KEY_ROUTES = [
+      '/api/links',
+      '/api/collections',
+      '/api/tags',
+      '/api/metadata',
+      '/api/enrich',
+      '/api/search',
+      '/api/link-health',
+      '/api/saved-views',
+      '/api/insights',
+    ];
+    const isAllowed = ALLOWED_API_KEY_ROUTES.some((prefix) => reqPath.startsWith(prefix));
+    if (!isAllowed) {
+      return res.status(403).json({ error: 'Personal API keys are restricted to bookmark and collection operations.' });
+    }
+
     try {
       const result = await authenticateApiKey(token);
       if (!result) {
         return res.status(401).json({ error: 'Not authorized. Invalid API key.' });
+      }
+
+      // Check whether the key owner is suspended
+      const keyUser = await User.findById(result.userId).select('status');
+      if (!keyUser || keyUser.status === 'suspended') {
+        return res.status(403).json({ error: 'Your account has been suspended by an administrator.' });
       }
 
       // A read-only key may only read.
@@ -103,7 +129,7 @@ module.exports = async function auth(req, res, next) {
     const v = payload.v || 0;
 
     let cached = getCachedTokenVersion(userId);
-    if (cached === undefined || cached !== v) {
+    if (!cached || cached.v !== v) {
       const user = await User.findById(userId).select('tokenVersion status role');
       if (!user) {
         return res.status(401).json({ error: 'Not authorized. Token invalid or expired.' });
@@ -111,15 +137,17 @@ module.exports = async function auth(req, res, next) {
       if (user.status === 'suspended') {
         return res.status(403).json({ error: 'Your account has been suspended by an administrator.' });
       }
-      cached = user.tokenVersion || 0;
-      setCachedTokenVersion(userId, cached);
+      const newVersion = user.tokenVersion || 0;
+      setCachedTokenVersion(userId, newVersion, user.status || 'active');
       req.userRole = user.role || 'user';
+      if (newVersion !== v) {
+        return res.status(401).json({ error: 'Not authorized. Token invalid or expired.' });
+      }
     } else {
+      if (cached.status === 'suspended') {
+        return res.status(403).json({ error: 'Your account has been suspended by an administrator.' });
+      }
       req.userRole = payload.role || 'user';
-    }
-
-    if (cached !== v) {
-      return res.status(401).json({ error: 'Not authorized. Token invalid or expired.' });
     }
 
     req.userId = userId;

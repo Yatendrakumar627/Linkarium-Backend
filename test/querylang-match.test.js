@@ -60,6 +60,7 @@ describe('matchesQuery', () => {
   test('matches the flags', () => {
     assert.strictEqual(matchesQuery(doc(), parseQuery('is:favorite')), true);
     assert.strictEqual(matchesQuery(doc(), parseQuery('is:broken')), false);
+    assert.strictEqual(matchesQuery(doc({ health: { status: 'broken' } }), parseQuery('is:broken')), true);
     assert.strictEqual(matchesQuery(doc(), parseQuery('is:healthy')), true);
     assert.strictEqual(matchesQuery(doc(), parseQuery('is:archived')), false);
     assert.strictEqual(matchesQuery(doc(), parseQuery('is:unarchived')), true);

@@ -106,6 +106,23 @@ describe('compileAst', () => {
       $or: [{ host: { $in: ['google.com'] } }, { hostLabel: { $in: ['google.com'] } }],
     });
   });
+
+  test('compiles health status flags: is:broken and is:healthy', () => {
+    const ast = parseQuery('is:broken');
+    const { filter } = compileAst(ast, { user: 'u1' });
+    assert.deepStrictEqual(filter.$and[1], { 'health.status': 'broken' });
+
+    const healthyAst = parseQuery('is:healthy');
+    const healthyCompiled = compileAst(healthyAst, { user: 'u1' });
+    assert.deepStrictEqual(healthyCompiled.filter.$and[1], { 'health.status': 'healthy' });
+  });
+
+  test('compiles is:stale flag to lastOkAt comparison', () => {
+    const ast = parseQuery('is:stale');
+    const { filter } = compileAst(ast, { user: 'u1' });
+    assert.ok(Array.isArray(filter.$and[1].$or));
+    assert.strictEqual(filter.$and[1].$or[1]['health.lastOkAt'], null);
+  });
 });
 
 describe('scoreLink', () => {

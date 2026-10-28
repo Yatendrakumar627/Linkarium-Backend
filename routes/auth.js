@@ -256,9 +256,12 @@ router.post('/verify-otp', async (req, res) => {
       return res.status(429).json({ error: 'Too many attempts. Please sign in again.' });
     }
 
-    const user = await User.findById(challenge.user);
+    const user = await User.findById(challenge.user).select('+totp.secret +recoveryCodes');
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+    if (user.status === 'suspended') {
+      return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
     }
 
     const secret = user.totp?.secret;
@@ -304,10 +307,10 @@ router.post('/refresh', async (req, res) => {
 
     const payload = verifyToken(rt, 'refresh');
     const user = await User.findById(payload.id);
-    if (!user || (payload.v || 0) !== (user.tokenVersion || 0)) {
+    if (!user || user.status === 'suspended' || (payload.v || 0) !== (user.tokenVersion || 0)) {
       clearRefreshCookie(res);
       invalidateTokenVersion(payload.id);
-      return res.status(401).json({ error: 'Not authorized. Token invalid or expired.' });
+      return res.status(401).json({ error: 'Not authorized. Token invalid, expired, or account suspended.' });
     }
 
     // Refresh-token reuse detection & revocation check

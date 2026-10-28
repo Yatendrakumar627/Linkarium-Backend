@@ -1,15 +1,19 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
-// Shared secret used to sign both short-lived access tokens and longer-lived
-// refresh tokens.
+// Secret used to sign short-lived access tokens.
 function getJwtSecret() {
   return process.env.JWT_SECRET;
 }
 
-// Cached tokenVersion per userId -> { v, at }. Avoids a DB hit on every
+// Secret used to sign longer-lived refresh tokens. Falls back to JWT_SECRET if REFRESH_TOKEN_SECRET is not configured.
+function getRefreshTokenSecret() {
+  return process.env.REFRESH_TOKEN_SECRET || process.env.JWT_SECRET;
+}
+
+// Cached tokenVersion and account status per userId -> { v, status, at }. Avoids a DB hit on every
 // authenticated request; invalidated whenever we bump tokenVersion (password
-// change / logout-all).
+// change / logout-all / suspension).
 //
 // The TTL also bounds how long a revocation can take to reach another server
 // instance, since this cache is per-process.
@@ -19,12 +23,12 @@ const TOKEN_VER_CACHE_TTL_MS = 15_000;
 function getCachedTokenVersion(userId) {
   const k = String(userId);
   const c = tokenVersionCache.get(k);
-  if (c && Date.now() - c.at < TOKEN_VER_CACHE_TTL_MS) return c.v;
+  if (c && Date.now() - c.at < TOKEN_VER_CACHE_TTL_MS) return c;
   return undefined;
 }
 
-function setCachedTokenVersion(userId, v) {
-  tokenVersionCache.set(String(userId), { v, at: Date.now() });
+function setCachedTokenVersion(userId, v, status = 'active') {
+  tokenVersionCache.set(String(userId), { v, status, at: Date.now() });
 }
 
 function invalidateTokenVersion(userId) {
@@ -52,13 +56,25 @@ function signAccessToken(user) {
 function signRefreshToken(user) {
   return jwt.sign(
     { id: user._id, v: user.tokenVersion || 0, typ: 'refresh', jti: crypto.randomUUID() },
-    getJwtSecret(),
+    getRefreshTokenSecret(),
     { expiresIn: process.env.REFRESH_TOKEN_TTL || '7d' }
   );
 }
 
 function verifyToken(token, expectedType) {
-  const payload = jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] });
+  const secret = expectedType === 'refresh' ? getRefreshTokenSecret() : getJwtSecret();
+  let payload;
+  try {
+    payload = jwt.verify(token, secret, { algorithms: ['HS256'] });
+  } catch (err) {
+    // Graceful backward-compatibility fallback for refresh tokens issued before secret separation
+    if (expectedType === 'refresh' && secret !== getJwtSecret()) {
+      payload = jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] });
+    } else {
+      throw err;
+    }
+  }
+
   if (expectedType && payload.typ && payload.typ !== expectedType) {
     const err = new Error('Invalid token type');
     err.name = 'TokenTypeError';

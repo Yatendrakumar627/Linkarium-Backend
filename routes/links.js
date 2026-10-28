@@ -23,8 +23,8 @@ router.use(auth);
 
 // Upper bound on the candidate set pulled in for relevance ranking. Keeps a
 // pathological query (a single letter) from loading an entire account into
-// memory.
-const MAX_RANK_CANDIDATES = 1000;
+// memory while covering large datasets (100+ to 2500+ items).
+const MAX_RANK_CANDIDATES = 2500;
 
 // Derived fields that exist only to power search / duplicate detection. They
 // are never read by the client, and the token arrays in particular make list
@@ -352,7 +352,8 @@ router.post(
         continue;
       }
 
-      const canonical = canonicalizeUrl(url)?.canonical || url;
+      const canonicalObj = canonicalizeUrl(url);
+      const canonical = canonicalObj?.canonical || url;
       if (seenUrls.has(url) || seenCanonical.has(canonical)) {
         skipped++;
         continue;
@@ -363,6 +364,9 @@ router.post(
       const tags = row.tagsRaw
         ? row.tagsRaw.split(',').map((t) => t.trim()).filter(Boolean)
         : [];
+      const cleanTags = normalizeTags(tags);
+      const cleanTitle = String(row.title || row.url).trim();
+      const cleanDesc = row.description ? String(row.description).trim() : '';
 
       prepared.push({
         rowNum,
@@ -370,11 +374,21 @@ router.post(
         canonical,
         doc: {
           user: req.userId,
-          title: row.title || row.url,
+          title: cleanTitle,
+          titleLower: cleanTitle.toLowerCase(),
           url,
-          description: row.description || '',
+          canonicalUrl: canonicalObj ? canonicalObj.canonical : null,
+          host: canonicalObj ? canonicalObj.host : null,
+          hostLabel: canonicalObj ? canonicalObj.hostLabel : null,
+          tokens: buildSearchTokens({
+            title: cleanTitle,
+            description: cleanDesc,
+            tags: cleanTags,
+            url,
+          }),
+          description: cleanDesc,
           collectionId: null,
-          tags: normalizeTags(tags),
+          tags: cleanTags,
           favorite: false,
           color: randomColor(),
         },
@@ -765,7 +779,7 @@ router.get('/', async (req, res) => {
     const candidates = await Link.find(scoped)
       .sort({ createdAt: -1 })
       .limit(MAX_RANK_CANDIDATES)
-      .select('-titleLower -canonicalUrl -hostLabel')
+      .select('-titleLower -hostLabel')
       .lean();
 
     let ranked = candidates
@@ -784,7 +798,7 @@ router.get('/', async (req, res) => {
       const pool = await Link.find(relaxedScope)
         .sort({ createdAt: -1 })
         .limit(MAX_RANK_CANDIDATES)
-        .select('-titleLower -canonicalUrl -hostLabel')
+        .select('-titleLower -hostLabel')
         .lean();
 
       const fuzzyRanked = pool

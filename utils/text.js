@@ -27,8 +27,8 @@ const STOPWORDS = new Set(
     'was', 'we', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'will', 'with',
     'would', 'you', 'your', 'yours', 'yourself', 'yourselves',
     // web / url noise
-    'com', 'org', 'net', 'edu', 'gov', 'int', 'info', 'biz', 'co', 'io', 'dev', 'app', 'www', 'http', 'https',
-    'html', 'htm', 'php', 'aspx', 'jsp', 'index', 'page', 'site', 'website', 'home', 'amp', 'utm',
+    'com', 'org', 'net', 'edu', 'gov', 'int', 'info', 'biz', 'co', 'io', 'www', 'http', 'https',
+    'html', 'htm', 'php', 'aspx', 'jsp', 'index', 'amp', 'utm',
   ].map((w) => w.toLowerCase())
 );
 
@@ -40,6 +40,8 @@ function splitWords(input) {
   if (input === null || input === undefined) return [];
   return String(input)
     .toLowerCase()
+    .replace(/\bc\+\+/gi, ' cpp ')
+    .replace(/\bc#/gi, ' csharp ')
     .split(/[^\p{L}\p{N}\p{M}]+/u)
     .filter(Boolean);
 }
